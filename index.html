@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
+
+    <script src="p2p-graph.js"></script>
+    <script src="p2p-media-loader-core.js"></script>
+    <script src="p2p-media-loader-hlsjs.js"></script>
+
+    <link type="text/css" rel="stylesheet" href="http://code.shutterstock.com/rickshaw/rickshaw.min.css">
+    <script src="http://code.shutterstock.com/rickshaw/vendor/d3.min.js"></script>
+    <script src="http://code.shutterstock.com/rickshaw/vendor/d3.layout.min.js"></script>
+    <script src="http://code.shutterstock.com/rickshaw/rickshaw.min.js"></script>
+
+    <!-- HlsJs -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+
+    <!-- Clappr -->
+    <script src="https://cdn.jsdelivr.net/clappr/latest/clappr.min.js"></script>
+
+    <!-- Flowplayer -->
+    <link rel="stylesheet" href="//releases.flowplayer.org/7.1.0/skin/skin.css">
+    <script src="https://releases.flowplayer.org/7.1.0/flowplayer.min.js"></script>
+    <script src="https://releases.flowplayer.org/hlsjs/flowplayer.hlsjs.min.js"></script>
+
+    <!-- MediaElement -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/mediaelement/4.2.5/mediaelementplayer.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mediaelement/4.2.5/mediaelement-and-player.min.js"></script>
+
+    <!-- VideoJs-Contrib-HlsJs -->
+    <link href="http://vjs.zencdn.net/5.19.2/video-js.css" rel="stylesheet">
+    <script src="http://vjs.zencdn.net/5.19.2/video.js"></script>
+    <script src="https://unpkg.com/videojs-contrib-hls.js@3.0.2"></script>
+
+    <style>
+        body {
+            margin-top: 1em;
+            margin-bottom: 3em;
+        }
+        #video {
+            width: 100%;
+        }
+        #level {
+            width: auto;
+            float: right;
+        }
+        #graph {
+            max-width: 100%;
+            overflow: hidden;
+            margin: 3em auto;
+            border: 1px solid #eee;
+        }
+        #chart_container {
+            position: relative;
+            margin: 3em auto;
+            padding: 0 20px;
+            max-width: 100%;
+        }
+        #y_axis {
+            position: absolute;
+            top: 0;
+            width: 40px;
+            left: -20px;
+        }
+        #y_axis > svg {
+            overflow: visible;
+        }
+        #legend {
+            position: absolute;
+            top: 20px;
+            left: 40px;
+            z-index: 1;
+        }
+        #legend-totals {
+            position: absolute;
+            bottom: 20px;
+            left: 40px;
+            z-index: 1;
+        }
+        #main-view.hide,
+        #error-view.hide {
+            display: none;
+        }
+    </style>
+
+</head>
+<body class="container">
+
+<h1>P2P Media Loader Demo</h1>
+
+<div id="info-view" class="row hide">
+    <div class="col-sm-12">
+        Sorry!<br>
+        WebRTC data channels API is not supported by your browser. :(<br>
+        <hr>
+        Read more at <a href="http://iswebrtcreadyyet.com/legacy.html" target="_blank">Is WebRTC ready yet?</a>
+    </div>
+</div>
+
+<div id="main-view" class="row">
+    <div class="col-md-8">
+        <div id="video_container" class="text-center"></div>
+        <div id="chart_container">
+            <div id="legend"></div>
+            <div id="legend-totals"></div>
+            <div id="y_axis"></div>
+            <div id="chart"></div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <form id="videoUrlForm">
+            <div class="form-group">
+                <label for="url">Video URL:</label>
+                <input type="text" class="form-control" id="url" name="url" placeholder="Please enter video url" required
+                       value="https://nasa-i.akamaihd.net/hls/live/253565/NASA-NTV1-Public/master.m3u8" />
+            </div>
+            <div class="form-group">
+                <label for="type">Player:</label>
+                <select class="form-control" id="type" name="type">
+                    <option value="hlsjs" selected>Hls.js</option>
+                    <option value="clappr">Clappr</option>
+                    <option value="flowplayer">Flowplayer</option>
+                    <option value="mediaelement">MediaElement</option>
+                    <option value="videojs-contrib-hlsjs">VideoJs-Contrib-HlsJs</option>
+                </select>
+            </div>
+            <button type="submit" class="btn btn-primary">Apply</button>
+        </form>
+        <div id="graph"></div>
+        <h3>Trackers:</h3>
+        <div id="announce"></div>
+    </div>
+</div>
+
+<div id="error-view" class="row hide">
+    <div class="col-sm-12">
+        Sorry!<br>
+        Your browser doesn't support hls.js engine. :(<br>
+        <hr>
+        Read more at <a href="https://en.wikipedia.org/wiki/Media_Source_Extensions" target="_blank">Media Source Extensions</a>.
+    </div>
+</div>
+
+<script>
+
+    var DemoApp = (function () {
+
+        var P2PGraphClass = require("p2p-graph");
+
+        function DemoApp() {
+            if (!Hls.isSupported()) {
+                document.querySelector("#main-view").classList.add("hide");
+                document.querySelector("#error-view").classList.remove("hide");
+                return;
+            }
+
+            if (!p2pml.WEBRTC_SUPPORT) {
+                document.querySelector("#info-view").classList.remove("hide");
+            }
+
+            this.initForm();
+
+            var videoUrlForm = document.getElementById("videoUrlForm");
+            this.videoUrl = videoUrlForm.url.value.trim();
+            this.playerType = videoUrlForm.type.value;
+            this.videoContainer = document.getElementById("video_container");
+
+            this.graph = new P2PGraphClass("#graph");
+            this.graph.add({ id: "me", name: "You", me: true });
+
+            this.downloadSpeedTimespan = 10; // seconds
+
+            var wowzaSegmentRegExp = /(.+)_w\d{6,}_(.+)/g;
+            var wowzaSegmentIdGenerator = function (url) {
+                return url.replace(wowzaSegmentRegExp, "$1$2");
+            };
+
+            this.loaderSettings = {
+                segmentIdGenerator: wowzaSegmentIdGenerator
+            };
+
+            this.initChart();
+            this.restartDemo();
+        }
+
+        DemoApp.prototype.initForm = function () {
+            var form = document.getElementById("videoUrlForm");
+            window.location.search.substr(1).split("&").forEach(function (e) {
+                var p = e.split("=");
+                if (p.length === 2) {
+                    var name = p[0];
+                    var value = window.decodeURIComponent(p[1]);
+                    switch (name) {
+                        case "url":
+                            form.url.value = value;
+                            break;
+                        case "type":
+                            form.type.value = value;
+                            break;
+                    }
+                }
+            });
+        };
+
+        DemoApp.prototype.restartDemo = function () {
+            this.downloadStats = [];
+            this.downloadTotals = { http: 0, p2p: 0 };
+
+            while (this.videoContainer.hasChildNodes()) {
+                this.videoContainer.removeChild(this.videoContainer.lastChild);
+            }
+
+            this.p2pmlLoader = new p2pml.HybridLoader(this.loaderSettings);
+            this.p2pmlLoader.on(p2pml.LoaderEvents.PieceBytesLoaded, this.onBytesLoaded.bind(this));
+            document.getElementById('announce').innerHTML = this.p2pmlLoader.getSettings().trackerAnnounce.join("<br />");
+
+            this.segmentManager = new p2pml.hlsjs.SegmentManager(this.p2pmlLoader);
+
+            switch (this.playerType) {
+                case 'hlsjs':
+                    this.initHlsJsPlayer();
+                    break;
+                case 'clappr':
+                    this.initClapprPlayer();
+                    break;
+                case 'flowplayer':
+                    this.initFlowplayerPlayer();
+                    break;
+                case 'mediaelement':
+                    this.initMediaElementPlayer();
+                    break;
+                case 'videojs-contrib-hlsjs':
+                    this.initVideoJsContribHlsJsPlayer();
+                    break;
+            }
+
+            this.refreshChart();
+            this.refreshGraph();
+        };
+
+        DemoApp.prototype.initHlsJsPlayer = function () {
+            if (Hls.isSupported()) {
+                var video = document.createElement("video");
+                video.id = "video";
+                video.controls = true;
+                this.videoContainer.appendChild(video);
+
+                var level = document.createElement("select");
+                level.id = "level";
+                level.classList.add("form-control");
+                this.videoContainer.appendChild(level);
+
+                var hls = new Hls();
+                p2pml.hlsjs.initHlsJsPlayer(hls, { segmentManager: this.segmentManager });
+                hls.loadSource(this.videoUrl);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                    this.hlsLevelSwitcher.init(hls, level);
+                    video.play();
+                    video.volume = 0;
+                }.bind(this));
+            }
+        };
+
+        DemoApp.prototype.initClapprPlayer = function () {
+            var video = document.createElement("div");
+            video.id = "video";
+            this.videoContainer.appendChild(video);
+
+            var player = new Clappr.Player({
+                parentId: "#video",
+                source: this.videoUrl
+            });
+            p2pml.hlsjs.initClapprPlayer(player, { segmentManager: this.segmentManager });
+            player.setVolume(0);
+            player.play();
+        };
+
+        DemoApp.prototype.initMediaElementPlayer = function () {
+            // allow only one supported renderer
+            mejs.Renderers.order = [ "native_hls" ];
+
+            var video = document.createElement("video");
+            video.id = "video";
+            this.videoContainer.appendChild(video);
+
+            var player = new MediaElementPlayer("video", {
+                stretching: "responsive",
+                startVolume: 0,
+                hls: {
+                    loader: p2pml.hlsjs.createLoaderClass({ segmentManager: this.segmentManager })
+                },
+                success: function (mediaElement) {
+                    p2pml.hlsjs.initMediaElementJsPlayer(mediaElement);
+                }
+            });
+
+            player.setSrc(this.videoUrl);
+            //player.options.forceLive = true;
+
+            player.load();
+            player.play();
+        };
+
+        DemoApp.prototype.initFlowplayerPlayer = function () {
+            var video = document.createElement("div");
+            video.id = "video";
+            video.className = "fp-slim";
+            this.videoContainer.appendChild(video);
+
+            var player = flowplayer("#video", {
+                volume: 0,
+                clip: {
+                    sources: [{
+                        type: "application/x-mpegurl",
+                        //live: true,
+                        src: this.videoUrl
+                    }]
+                }
+            });
+
+            p2pml.hlsjs.initFlowplayerHlsJsPlayer(player, { segmentManager: this.segmentManager });
+
+            player.on("ready", function () {
+                player.play();
+            });
+        };
+
+        DemoApp.prototype.initVideoJsContribHlsJsPlayer = function () {
+            var video = document.createElement("video");
+            video.id = "video";
+            video.controls = true;
+            video.preload = "none";
+            video.className = "video-js vjs-default-skin";
+            this.videoContainer.appendChild(video);
+
+            var player = videojs("video", { html5: { hlsjsConfig: {
+                loader: p2pml.hlsjs.createLoaderClass({ segmentManager: this.segmentManager })
+            } } });
+
+            p2pml.hlsjs.initVideoJsContribHlsJsPlayer(player);
+
+            player.src({
+                type: "application/x-mpegURL",
+                src: this.videoUrl
+            });
+
+            player.ready(function() {
+                player.volume(0);
+                player.play();
+            });
+        };
+
+        DemoApp.prototype.initChart = function (event) {
+            this.chart = new Rickshaw.Graph({
+                element: document.querySelector("#chart"),
+                renderer: 'multi',
+                interpolation: "basis",
+                stack: false,
+                strokeWidth: 5,
+                series: [
+                    {name: "Total", color: "#f64", data: [], renderer: 'line'},
+                    {name: "P2P", color: "#88b9ea", data: [], renderer: 'area'},
+                    {name: "HTTP", color: "#eae288", data: [], renderer: 'area'}
+                ]
+            });
+
+            new Rickshaw.Graph.Axis.X({
+                graph: this.chart,
+                tickFormat: function() { return ''; }
+            });
+
+            new Rickshaw.Graph.Axis.Y({
+                graph: this.chart,
+                orientation: 'left',
+                element: document.getElementById('y_axis')
+            });
+
+            this.legend = new Rickshaw.Graph.Legend({
+                graph: this.chart,
+                element: document.getElementById('legend')
+            });
+
+            this.legendTotals = new Rickshaw.Graph.Legend({
+                graph: this.chart,
+                element: document.getElementById("legend-totals")
+            });
+
+            this.chart.render();
+            setInterval(this.updateChartData.bind(this), 500);
+        };
+
+        DemoApp.prototype.refreshChart = function () {
+            var data0 = this.chart.series[0].data;
+            var data1 = this.chart.series[1].data;
+            var data2 = this.chart.series[2].data;
+            var lastX = data0.length > 0 ? data0[data0.length - 1].x : -1;
+
+            var seriesDataMapper = function(currentValue, index) {
+                return {x: index + lastX + 1, y: 0};
+            };
+
+            data0.length = 0;
+            data1.length = 0;
+            data2.length = 0;
+
+            var stubData = Array.apply(null, Array(200)).map(seriesDataMapper);
+            data0.push.apply(data0, stubData.slice(0));
+            data1.push.apply(data1, stubData.slice(0));
+            data2.push.apply(data2, stubData.slice(0));
+
+            this.chart.update();
+        };
+
+        DemoApp.prototype.updateChartData = function () {
+            if (this.chart) {
+                var speed = this.getDownloadSpeed();
+                var http = Number((speed.http * 8 / 1000000).toFixed(2));
+                var p2p = Number((speed.p2p * 8 / 1000000).toFixed(2));
+                var total = Number((http + p2p).toFixed(2));
+
+                var data0 = this.chart.series[0].data;
+                var data1 = this.chart.series[1].data;
+                var data2 = this.chart.series[2].data;
+                var x = data0.length > 0 ? data0[data0.length - 1].x + 1 : 0;
+
+                data0.shift();
+                data1.shift();
+                data2.shift();
+                data0.push({x: x, y: total});
+                data1.push({x: x, y: total});
+                data2.push({x: x, y: http});
+                this.chart.update();
+
+                this.formatChartLegendLine(0, http);
+                this.formatChartLegendLine(1, p2p);
+                this.formatChartLegendLine(2, total);
+
+                this.updateLegendTotals();
+            }
+        };
+
+        DemoApp.prototype.formatChartLegendLine = function (index, speed) {
+            if (this.legend) {
+                var line = this.legend.lines[index];
+                line.element.childNodes[1].textContent = line.series.name + ' - '+ speed + ' Mbit/s';
+            }
+        };
+
+        DemoApp.prototype.updateLegendTotals = function () {
+            if (!this.legendTotals) {
+                return;
+            }
+
+            var httpMb = this.downloadTotals.http / 1048576;
+            var p2pMb = this.downloadTotals.p2p / 1048576;
+            var totalMb = httpMb + p2pMb;
+
+            if (totalMb > 0) {
+                this.legendTotals.lines[0].element.childNodes[1].textContent
+                    = "HTTP - "
+                    + Number(httpMb).toFixed(1) + " MiB - "
+                    + Number((httpMb * 100) / totalMb).toFixed(0) + "%";
+
+                this.legendTotals.lines[1].element.childNodes[1].textContent
+                    = "P2P - "
+                    + Number(p2pMb).toFixed(1) + " MiB - "
+                    + Number((p2pMb * 100) / totalMb).toFixed(0) + "%";
+
+                this.legendTotals.lines[2].element.childNodes[1].textContent
+                    = "Total - "
+                    + Number(totalMb).toFixed(1) + " MiB";
+            }
+        };
+
+        DemoApp.prototype.getDownloadSpeed = function () {
+            var startingPoint = Date.now() - (this.downloadSpeedTimespan * 1000);
+            var httpSize = 0;
+            var p2pSize = 0;
+
+            var i = this.downloadStats.length;
+            while (i--) {
+                var stat = this.downloadStats[i];
+                if (stat.timestamp < startingPoint) {
+                    break;
+                }
+
+                if (stat.method === "p2p") {
+                    p2pSize += stat.size;
+                } else if (stat.method === "http") {
+                    httpSize += stat.size;
+                }
+            }
+
+            this.downloadStats.splice(0, i + 1);
+
+            return {p2p: p2pSize / this.downloadSpeedTimespan, http: httpSize / this.downloadSpeedTimespan};
+        };
+
+        DemoApp.prototype.onBytesLoaded = function (method, size, timestamp) {
+            this.downloadStats.push({"method": method, "size": size, "timestamp": timestamp});
+            this.downloadTotals[method] += size;
+        };
+
+        DemoApp.prototype.refreshGraph = function (p2pLoader) {
+            var nodes = this.graph.list();
+            for (var i = 0; i < nodes.length; i++) {
+                if (nodes[i].id !== "me") {
+                    this.graph.disconnect("me", nodes[i].id);
+                    this.graph.remove(nodes[i].id);
+                }
+            }
+
+            this.p2pmlLoader.on(p2pml.LoaderEvents.PeerConnect, this.onPeerConnect.bind(this));
+            this.p2pmlLoader.on(p2pml.LoaderEvents.PeerClose, this.onPeerClose.bind(this));
+        };
+
+        DemoApp.prototype.onPeerConnect = function (mediaPeer) {
+            var peer = mediaPeer.peer;
+            if (!this.graph.hasPeer(peer.id)) {
+                this.graph.add({id: peer.id, name: peer.remoteAddress || 'Unknown'});
+                this.graph.connect("me", peer.id);
+            }
+        };
+
+        DemoApp.prototype.onPeerClose = function (mediaPeer) {
+            var peer = mediaPeer.peer;
+            if (this.graph.hasPeer(peer.id)) {
+                this.graph.disconnect("me", peer.id);
+                this.graph.remove(peer.id);
+            }
+        };
+
+        DemoApp.prototype.hlsLevelSwitcher = {
+
+            auto: "Auto",
+            hls: undefined,
+            select: undefined,
+
+            init: function (hls, select) {
+                if (hls.levelController.levels.length < 2) {
+                    select.style.display = "none";
+                    return;
+                } else {
+                    select.style.display = "block";
+                }
+
+                this.hls = hls;
+                this.select = select;
+
+                this._clearOptions();
+                this._addOption(this.auto);
+                hls.levelController.levels.forEach(function (e, i) {
+                    var name = [];
+                    if (e.height) {
+                        name.push(e.height + "p");
+                    }
+                    if (e.bitrate) {
+                        name.push(Math.round(e.bitrate / 1000) + "k");
+                    }
+                    if (name.length === 0) {
+                        name.push("Quality #" + i);
+                    }
+                    this._addOption(name.join(" / "), i);
+                }.bind(this));
+
+                hls.on(Hls.Events.LEVEL_SWITCHED, this._hlsLevelSwitch.bind(this));
+
+                this.select.addEventListener("change", function (event) {
+                    hls.nextLevel = event.target.selectedIndex - 1;
+                    this._hlsLevelSwitch();
+                }.bind(this));
+            },
+
+            _hlsLevelSwitch: function () {
+                var auto = this.select.querySelector("option:not([data-index])");
+                var curr = this.select.querySelector("option[data-index='" + this.hls.currentLevel + "']");
+                if (this.hls.autoLevelEnabled || this.hls.currentLevel === -1) {
+                    auto.selected = true;
+                    auto.text = curr ? curr.text + " (" + this.auto + ")" : this.auto;
+                } else {
+                    curr.selected = true;
+                    auto.text = this.auto;
+                }
+            },
+
+            _clearOptions: function () {
+                while (this.select.options.length) {
+                    this.select.remove(0);
+                }
+            },
+
+            _addOption: function (text, index) {
+                var option = document.createElement("option");
+                option.text = text;
+                if (index !== undefined) {
+                    option.dataset.index = index;
+                }
+                this.select.add(option);
+            }
+
+        };
+
+        return DemoApp;
+    }());
+
+    var demo = new DemoApp();
+    /*setTimeout(function() {
+        demo.downloadTotals = { http: 0, p2p: 0 };
+        console.log("--------------------------------------------------------------------------------");
+    }, 60000);*/
+
+
+</script>
+
+</body>
+</html>
