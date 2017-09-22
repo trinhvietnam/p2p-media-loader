@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+
     <!-- Global Site Tag (gtag.js) - Google Analytics -->
     <script async src="https://www.googletagmanager.com/gtag/js?id=UA-106860120-1"></script>
     <script>
@@ -30,6 +31,7 @@
 
     <!-- Clappr -->
     <script src="https://cdn.jsdelivr.net/clappr/latest/clappr.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/clappr.level-selector/latest/level-selector.min.js"></script>
 
     <!-- Flowplayer -->
     <link rel="stylesheet" href="//releases.flowplayer.org/7.1.0/skin/skin.css">
@@ -100,13 +102,29 @@
 <body class="container">
 
 <h1>P2P Media Loader Demo</h1>
-Git: <a href="https://github.com/Novage/p2p-media-loader">https://github.com/Novage/p2p-media-loader</a>
-<div id="info-view" class="row hide">
+
+<div>
+    <div class="col-sm-12">
+        Git: <a href="https://github.com/novage/p2p-media-loader">https://github.com/novage/p2p-media-loader</a>
+        <hr>
+    </div>
+</div>
+
+<div id="error-webrtc-data-channels" class="row hide">
     <div class="col-sm-12">
         Sorry!<br>
         WebRTC data channels API is not supported by your browser. :(<br>
-        <hr>
         Read more at <a href="http://iswebrtcreadyyet.com/legacy.html" target="_blank">Is WebRTC ready yet?</a>
+        <hr>
+    </div>
+</div>
+
+<div id="error-hls-js" class="row hide">
+    <div class="col-sm-12">
+        Sorry!<br>
+        Your browser doesn't support hls.js engine. :(<br>
+        Read more at <a href="https://en.wikipedia.org/wiki/Media_Source_Extensions" target="_blank">Media Source Extensions</a>.
+        <hr>
     </div>
 </div>
 
@@ -123,15 +141,15 @@ Git: <a href="https://github.com/Novage/p2p-media-loader">https://github.com/Nov
     <div class="col-md-4">
         <form id="videoUrlForm">
             <div class="form-group">
-                <label for="url">Video URL (https):</label>
+                <label for="url">Video URL<span id="https-only" class="hide"> (HTTPS only)</span>:</label>
                 <input type="text" class="form-control" id="url" name="url" placeholder="Please enter video url" required
                        value="https://nasa-i.akamaihd.net/hls/live/253565/NASA-NTV1-Public/master.m3u8" />
             </div>
             <div class="form-group">
                 <label for="type">Player:</label>
                 <select class="form-control" id="type" name="type">
-                    <option value="hlsjs" selected>Hls.js</option>
-                    <option value="clappr">Clappr</option>
+                    <option value="clappr" selected>Clappr</option>
+                    <option value="hlsjs">Hls.js</option>
                     <option value="flowplayer">Flowplayer</option>
                     <option value="mediaelement">MediaElement</option>
                     <option value="videojs-contrib-hlsjs">VideoJs-Contrib-HlsJs</option>
@@ -145,14 +163,6 @@ Git: <a href="https://github.com/Novage/p2p-media-loader">https://github.com/Nov
     </div>
 </div>
 
-<div id="error-view" class="row hide">
-    <div class="col-sm-12">
-        Sorry!<br>
-        Your browser doesn't support hls.js engine. :(<br>
-        <hr>
-        Read more at <a href="https://en.wikipedia.org/wiki/Media_Source_Extensions" target="_blank">Media Source Extensions</a>.
-    </div>
-</div>
 
 <script>
 
@@ -162,13 +172,15 @@ Git: <a href="https://github.com/Novage/p2p-media-loader">https://github.com/Nov
 
         function DemoApp() {
             if (!Hls.isSupported()) {
-                document.querySelector("#main-view").classList.add("hide");
-                document.querySelector("#error-view").classList.remove("hide");
-                return;
+                document.querySelector("#error-hls-js").classList.remove("hide");
             }
 
             if (!p2pml.WEBRTC_SUPPORT) {
-                document.querySelector("#info-view").classList.remove("hide");
+                document.querySelector("#error-webrtc-data-channels").classList.remove("hide");
+            }
+
+            if (location.protocol == "https:") {
+                document.querySelector("#https-only").classList.remove("hide");
             }
 
             this.initForm();
@@ -282,6 +294,9 @@ Git: <a href="https://github.com/Novage/p2p-media-loader">https://github.com/Nov
 
             var player = new Clappr.Player({
                 parentId: "#video",
+                plugins: {
+                    'core': [LevelSelector]
+                },
                 source: this.videoUrl
             });
             p2pml.hlsjs.initClapprPlayer(player, { segmentManager: this.segmentManager });
@@ -618,11 +633,6 @@ Git: <a href="https://github.com/Novage/p2p-media-loader">https://github.com/Nov
     }());
 
     var demo = new DemoApp();
-    /*setTimeout(function() {
-        demo.downloadTotals = { http: 0, p2p: 0 };
-        console.log("--------------------------------------------------------------------------------");
-    }, 60000);*/
-
 
 </script>
 
