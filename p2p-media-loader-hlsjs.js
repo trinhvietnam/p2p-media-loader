@@ -1474,7 +1474,6 @@ var p2p_media_loader_core_1 = require("p2p-media-loader-core");
 var segment_manager_1 = require("./segment-manager");
 var hlsjs_loader_1 = require("./hlsjs-loader");
 var createHlsJsLoaderClass = require("./hlsjs-loader-class");
-var defaultLiveSyncDuration = 60;
 function initHlsJsEvents(player, segmentManager) {
     player.on("hlsFragChanged", function (event, data) {
         var url = data && data.frag ? data.frag.url : undefined;
@@ -1490,36 +1489,21 @@ function createLoaderClass(settings) {
     return createHlsJsLoaderClass(hlsjs_loader_1.default, manager);
 }
 exports.createLoaderClass = createLoaderClass;
-function initHlsJsPlayer(player, settings) {
-    if (settings === void 0) { settings = {}; }
-    var loader = createLoaderClass(settings);
-    player.config.loader = loader;
-    player.config.liveSyncDuration = defaultLiveSyncDuration;
-    initHlsJsEvents(player, loader.getSegmentManager());
+function initHlsJsPlayer(player) {
+    if (player && player.config && player.config.loader && typeof player.config.loader.getSegmentManager === "function") {
+        initHlsJsEvents(player, player.config.loader.getSegmentManager());
+    }
 }
 exports.initHlsJsPlayer = initHlsJsPlayer;
-function initClapprPlayer(player, settings) {
-    if (settings === void 0) { settings = {}; }
+function initClapprPlayer(player) {
     player.on("play", function () {
-        var playback = player.core.getCurrentPlayback();
-        var hlsInstance = playback._hls;
-        if (hlsInstance && hlsInstance.config && hlsInstance.config.loader && typeof hlsInstance.config.loader.getSegmentManager !== "function") {
-            initHlsJsPlayer(hlsInstance, settings);
-            var segmentManager = hlsInstance.config.loader.getSegmentManager();
-            segmentManager.loadPlaylist(player.options.source, "manifest", true);
-        }
+        initHlsJsPlayer(player.core.getCurrentPlayback()._hls);
     });
 }
 exports.initClapprPlayer = initClapprPlayer;
-function initFlowplayerHlsJsPlayer(player, settings) {
-    if (settings === void 0) { settings = {}; }
+function initFlowplayerHlsJsPlayer(player) {
     player.on("ready", function () {
-        var engine = player.engine;
-        if (engine && engine.hlsjs && engine.hlsjs.config && engine.hlsjs.config.loader && typeof engine.hlsjs.config.loader.getSegmentManager !== "function") {
-            initHlsJsPlayer(engine.hlsjs, settings);
-            var segmentManager = engine.hlsjs.config.loader.getSegmentManager();
-            segmentManager.loadPlaylist(player.video.url, "manifest", true);
-        }
+        initHlsJsPlayer(player.engine.hlsjs);
     });
 }
 exports.initFlowplayerHlsJsPlayer = initFlowplayerHlsJsPlayer;
@@ -1527,17 +1511,12 @@ function initVideoJsContribHlsJsPlayer(player) {
     player.ready(function () {
         var options = player.tech_.options_;
         if (options && options.hlsjsConfig && options.hlsjsConfig.loader && typeof options.hlsjsConfig.loader.getSegmentManager === "function") {
-            var segmentManager = options.hlsjsConfig.loader.getSegmentManager();
-            options.hlsjsConfig.liveSyncDuration = defaultLiveSyncDuration;
-            initHlsJsEvents(player.tech_, segmentManager);
+            initHlsJsEvents(player.tech_, options.hlsjsConfig.loader.getSegmentManager());
         }
     });
 }
 exports.initVideoJsContribHlsJsPlayer = initVideoJsContribHlsJsPlayer;
 function initMediaElementJsPlayer(mediaElement) {
-    mediaElement.addEventListener("hlsManifestParsed", function (event) {
-        mediaElement.hlsPlayer.config.liveSyncDuration = defaultLiveSyncDuration;
-    });
     mediaElement.addEventListener("hlsFragChanged", function (event) {
         var url = event.data && event.data.length > 1 && event.data[1].frag ? event.data[1].frag.url : undefined;
         var hls = mediaElement.hlsPlayer;
