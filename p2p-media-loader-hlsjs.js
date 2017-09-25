@@ -159,6 +159,7 @@ var SegmentManager = /** @class */ (function () {
                     case 2:
                         content = _b.sent();
                         this.processPlaylist(url, type, content);
+                        this.setCurrentSegment();
                         return [3 /*break*/, 4];
                     case 3:
                         e_1 = _b.sent();
@@ -213,9 +214,7 @@ var SegmentManager = /** @class */ (function () {
         this.prevLoadUrl = url;
     };
     SegmentManager.prototype.setCurrentSegment = function (url) {
-        if (!url) {
-            return;
-        }
+        if (url === void 0) { url = ""; }
         var urlIndex = this.playQueue.indexOf(url);
         if (urlIndex >= 0) {
             this.playQueue = this.playQueue.slice(urlIndex);
@@ -288,7 +287,6 @@ var SegmentManager = /** @class */ (function () {
             segments.push(new p2p_media_loader_core_1.Segment(segmentUrl, priority++));
         }
         this.loader.load(segments, this.getSwarmId(playlist), loadUrl);
-        //console.log("total segments / play queue", segments.length, this.playQueue.length);
     };
     SegmentManager.prototype.getSwarmId = function (playlist) {
         var master = this.getMasterPlaylist();
