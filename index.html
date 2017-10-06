@@ -68,7 +68,7 @@
         #chart_container {
             position: relative;
             margin: 3em auto;
-            padding: 0 20px;
+            padding-left: 20px;
             max-width: 100%;
         }
         #y_axis {
@@ -226,7 +226,10 @@
 
             this.p2pmlLoader = new p2pml.HybridLoader(this.loaderSettings);
             this.p2pmlLoader.on(p2pml.LoaderEvents.PieceBytesLoaded, this.onBytesLoaded.bind(this));
-            document.getElementById('announce').innerHTML = this.p2pmlLoader.getSettings().trackerAnnounce.join("<br />");
+            var trackerAnnounce = this.p2pmlLoader.getSettings().trackerAnnounce;
+            if (Array.isArray(trackerAnnounce)) {
+                document.getElementById('announce').innerHTML = trackerAnnounce.join("<br />");
+            }
 
             this.segmentManager = new p2pml.hlsjs.SegmentManager(this.p2pmlLoader);
 
@@ -396,7 +399,7 @@
         };
 
         DemoApp.prototype.initChart = function (event) {
-            this.chart = new Rickshaw.Graph({
+            var chartConf = {
                 element: document.querySelector("#chart"),
                 renderer: 'multi',
                 interpolation: "basis",
@@ -407,7 +410,9 @@
                     {name: "P2P", color: "#88b9ea", data: [], renderer: 'area'},
                     {name: "HTTP", color: "#eae288", data: [], renderer: 'area'}
                 ]
-            });
+            };
+
+            this.chart = new Rickshaw.Graph(chartConf);
 
             new Rickshaw.Graph.Axis.X({
                 graph: this.chart,
@@ -432,6 +437,15 @@
 
             this.chart.render();
             setInterval(this.updateChartData.bind(this), 500);
+
+            var chartResize = function () {
+                chartConf.width = this.chart.element.clientWidth;
+                this.chart.configure(chartConf);
+                this.chart.render();
+            }.bind(this);
+
+            chartResize();
+            window.addEventListener("resize", chartResize);
         };
 
         DemoApp.prototype.refreshChart = function () {
@@ -559,19 +573,17 @@
             this.p2pmlLoader.on(p2pml.LoaderEvents.PeerClose, this.onPeerClose.bind(this));
         };
 
-        DemoApp.prototype.onPeerConnect = function (mediaPeer) {
-            var peer = mediaPeer.peer;
+        DemoApp.prototype.onPeerConnect = function (peer) {
             if (!this.graph.hasPeer(peer.id)) {
                 this.graph.add({id: peer.id, name: peer.remoteAddress || 'Unknown'});
                 this.graph.connect("me", peer.id);
             }
         };
 
-        DemoApp.prototype.onPeerClose = function (mediaPeer) {
-            var peer = mediaPeer.peer;
-            if (this.graph.hasPeer(peer.id)) {
-                this.graph.disconnect("me", peer.id);
-                this.graph.remove(peer.id);
+        DemoApp.prototype.onPeerClose = function (id) {
+            if (this.graph.hasPeer(id)) {
+                this.graph.disconnect("me", id);
+                this.graph.remove(id);
             }
         };
 
