@@ -484,7 +484,6 @@ var LoaderEvents;
 })(LoaderEvents = exports.LoaderEvents || (exports.LoaderEvents = {}));
 
 },{}],6:[function(require,module,exports){
-(function (Buffer){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = Object.setPrototypeOf ||
@@ -500,13 +499,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 var events_1 = require("events");
 var loader_interface_1 = require("./loader-interface");
 var Debug = require("debug");
-var SegmentPiece = /** @class */ (function () {
-    function SegmentPiece(index, data) {
-        this.index = index;
-        this.data = data;
-    }
-    return SegmentPiece;
-}());
 var MediaPeerCommands;
 (function (MediaPeerCommands) {
     MediaPeerCommands["SegmentData"] = "segment_data";
@@ -520,25 +512,34 @@ var MediaPeerEvents;
     MediaPeerEvents["Connect"] = "peer_connect";
     MediaPeerEvents["Close"] = "peer_close";
     MediaPeerEvents["Error"] = "peer_error";
-    MediaPeerEvents["DataSegmentsMap"] = "peer_data_segments_map";
-    MediaPeerEvents["DataSegmentRequest"] = "peer_data_segment_request";
-    MediaPeerEvents["DataSegmentLoaded"] = "peer_data_segment_loaded";
-    MediaPeerEvents["DataSegmentAbsent"] = "peer_data_segment_absent";
+    MediaPeerEvents["SegmentsMap"] = "peer_segments_map";
+    MediaPeerEvents["SegmentRequest"] = "peer_segment_request";
+    MediaPeerEvents["SegmentLoaded"] = "peer_segment_loaded";
+    MediaPeerEvents["SegmentAbsent"] = "peer_segment_absent";
+    MediaPeerEvents["SegmentError"] = "peer_segment_error";
 })(MediaPeerEvents = exports.MediaPeerEvents || (exports.MediaPeerEvents = {}));
 var MediaPeerSegmentStatus;
 (function (MediaPeerSegmentStatus) {
     MediaPeerSegmentStatus["Loaded"] = "loaded";
     MediaPeerSegmentStatus["LoadingByHttp"] = "loading_by_http";
 })(MediaPeerSegmentStatus = exports.MediaPeerSegmentStatus || (exports.MediaPeerSegmentStatus = {}));
+var DownloadingSegment = /** @class */ (function () {
+    function DownloadingSegment(id, size) {
+        this.id = id;
+        this.size = size;
+        this.bytesDownloaded = 0;
+        this.pieces = [];
+    }
+    return DownloadingSegment;
+}());
+var MAX_MESSAGE_SIZE = 16 * 1024;
 var MediaPeer = /** @class */ (function (_super) {
     __extends(MediaPeer, _super);
     function MediaPeer(peer) {
         var _this = _super.call(this) || this;
-        _this.segmentsPiecesData = new Map();
-        _this.segments = new Map();
-        _this.pieceSize = 4 * 1024;
-        _this.requestSegmentResponseTimeout = 3000;
-        _this.requestSegmentResponseTimers = new Map();
+        _this.downloadingSegment = null;
+        _this.segmentsForDownload = new Set();
+        _this.segmentsMap = new Map();
         _this.debug = Debug("p2pml:media-peer");
         _this.peer = peer;
         _this.peer.on("connect", function () { return _this.onPeerConnect(); });
@@ -559,49 +560,64 @@ var MediaPeer = /** @class */ (function (_super) {
         this.emit(MediaPeerEvents.Error, this, error);
     };
     MediaPeer.prototype.onPeerData = function (data) {
-        // TODO: validate data from peers
-        var dataString = new TextDecoder("utf-8").decode(data);
-        var dataObject;
-        try {
-            dataObject = JSON.parse(dataString);
+        var bytes = new Uint8Array(data);
+        var command = null;
+        // JSON string check by first, second and last characters: '{" .... }'
+        if (bytes[0] == 123 && bytes[1] == 34 && bytes[data.byteLength - 1] == 125) {
+            try {
+                command = JSON.parse(new TextDecoder("utf-8").decode(data));
+            }
+            catch (_a) {
+            }
         }
-        catch (err) {
-            this.debug(err);
+        if (command == null) {
+            if (!this.downloadingSegment) {
+                // The segment was not requested or canceled
+                return;
+            }
+            this.downloadingSegment.bytesDownloaded += data.byteLength;
+            this.downloadingSegment.pieces.push(data);
+            this.emit(loader_interface_1.LoaderEvents.PieceBytesLoaded, "p2p", data.byteLength, Date.now());
+            if (this.downloadingSegment.bytesDownloaded == this.downloadingSegment.size) {
+                var segmentData = new Uint8Array(this.downloadingSegment.size);
+                var offset = 0;
+                for (var _i = 0, _b = this.downloadingSegment.pieces; _i < _b.length; _i++) {
+                    var piece = _b[_i];
+                    segmentData.set(new Uint8Array(piece), offset);
+                    offset += piece.byteLength;
+                }
+                this.emit(MediaPeerEvents.SegmentLoaded, this, this.downloadingSegment.id, segmentData.buffer);
+                this.downloadingSegment = null;
+            }
+            else if (this.downloadingSegment.bytesDownloaded > this.downloadingSegment.size) {
+                this.emit(MediaPeerEvents.SegmentError, this, this.downloadingSegment.id, "Too many bytes received for segment");
+                this.downloadingSegment = null;
+            }
             return;
         }
-        switch (dataObject.command) {
+        if (this.downloadingSegment) {
+            this.emit(MediaPeerEvents.SegmentError, this, this.downloadingSegment.id, "Segment download interrupted by a command");
+            this.downloadingSegment = null;
+            return;
+        }
+        switch (command.command) {
             case MediaPeerCommands.SegmentsMap:
-                this.segments = new Map(dataObject.segments);
-                this.emit(MediaPeerEvents.DataSegmentsMap);
+                this.segmentsMap = new Map(command.segments);
+                this.emit(MediaPeerEvents.SegmentsMap);
                 break;
             case MediaPeerCommands.SegmentRequest:
-                this.emit(MediaPeerEvents.DataSegmentRequest, this, dataObject.id);
+                this.emit(MediaPeerEvents.SegmentRequest, this, command.segment_id);
                 break;
             case MediaPeerCommands.SegmentData:
-                this.setResponseTimer(dataObject.id);
-                var segmentPieces = this.segmentsPiecesData.get(dataObject.id);
-                if (segmentPieces) {
-                    var piece = new SegmentPiece(dataObject.pieceIndex, dataObject.data);
-                    segmentPieces.push(piece);
-                    if (dataObject.piecesCount === segmentPieces.length) {
-                        this.removeResponseTimer(dataObject.id);
-                        segmentPieces.sort(function (a, b) { return a.index - b.index; });
-                        var stringData = [];
-                        for (var _i = 0, segmentPieces_1 = segmentPieces; _i < segmentPieces_1.length; _i++) {
-                            var piece_1 = segmentPieces_1[_i];
-                            stringData.push.apply(stringData, piece_1.data);
-                        }
-                        this.segmentsPiecesData.delete(dataObject.id);
-                        this.emit(MediaPeerEvents.DataSegmentLoaded, this, dataObject.id, Buffer.from(stringData).buffer);
-                    }
-                    this.emit(loader_interface_1.LoaderEvents.PieceBytesLoaded, "p2p", piece.data.length, Date.now());
+                if (this.segmentsForDownload.has(command.segment_id)) {
+                    this.downloadingSegment = new DownloadingSegment(command.segment_id, command.segment_size);
+                    this.segmentsForDownload.delete(command.segment_id);
                 }
                 break;
             case MediaPeerCommands.SegmentAbsent:
-                this.removeResponseTimer(dataObject.id);
-                this.segmentsPiecesData.delete(dataObject.id);
-                this.segments.delete(dataObject.id);
-                this.emit(MediaPeerEvents.DataSegmentAbsent, this, dataObject.id);
+                this.segmentsForDownload.delete(command.segment_id);
+                this.segmentsMap.delete(command.segment_id);
+                this.emit(MediaPeerEvents.SegmentAbsent, this, command.segment_id);
                 break;
             case MediaPeerCommands.CancelSegmentRequest:
                 // TODO: peer stop sending buffer
@@ -609,27 +625,6 @@ var MediaPeer = /** @class */ (function (_super) {
             default:
                 break;
         }
-    };
-    // TODO: move to Segment?
-    MediaPeer.prototype.getSegmentPieces = function (segment) {
-        var jsonBufferData = new Buffer(segment.data).toJSON().data;
-        var pieces = [];
-        if (jsonBufferData.length > this.pieceSize) {
-            var initialPiecesCount = Math.floor(jsonBufferData.length / this.pieceSize);
-            var hasFinalPiece = jsonBufferData.length % this.pieceSize > 0;
-            for (var i = 0; i < initialPiecesCount; i++) {
-                var start = i * this.pieceSize;
-                var end = start + this.pieceSize;
-                pieces.push(new SegmentPiece(i, jsonBufferData.slice(start, end)));
-            }
-            if (hasFinalPiece) {
-                pieces.push(new SegmentPiece(initialPiecesCount, jsonBufferData.slice(initialPiecesCount * this.pieceSize)));
-            }
-        }
-        else {
-            pieces.push(new SegmentPiece(0, jsonBufferData));
-        }
-        return pieces;
     };
     MediaPeer.prototype.sendCommand = function (command) {
         try {
@@ -649,65 +644,46 @@ var MediaPeer = /** @class */ (function (_super) {
         }
     };
     MediaPeer.prototype.getSegmentsMap = function () {
-        return this.segments;
+        return this.segmentsMap;
     };
     MediaPeer.prototype.sendSegmentsMap = function (segments) {
         this.sendCommand({ "command": MediaPeerCommands.SegmentsMap, "segments": segments });
     };
     MediaPeer.prototype.sendSegmentData = function (segment) {
-        var segmentPieces = this.getSegmentPieces(segment);
-        for (var _i = 0, segmentPieces_2 = segmentPieces; _i < segmentPieces_2.length; _i++) {
-            var segmentPiece = segmentPieces_2[_i];
-            this.sendCommand({
-                "command": MediaPeerCommands.SegmentData,
-                "id": segment.id,
-                "data": segmentPiece.data,
-                "pieceIndex": segmentPiece.index,
-                "piecesCount": segmentPieces.length
-            });
+        this.sendCommand({
+            "command": MediaPeerCommands.SegmentData,
+            "segment_id": segment.id,
+            "segment_size": segment.data.byteLength
+        });
+        var bytesLeft = segment.data.byteLength;
+        while (bytesLeft > 0) {
+            var bytesToSend = (bytesLeft >= MAX_MESSAGE_SIZE ? MAX_MESSAGE_SIZE : bytesLeft);
+            this.peer.write(new Uint8Array(segment.data, segment.data.byteLength - bytesLeft, bytesToSend));
+            bytesLeft -= bytesToSend;
         }
     };
-    MediaPeer.prototype.sendSegmentAbsent = function (id) {
-        this.sendCommand({ "command": MediaPeerCommands.SegmentAbsent, "id": id });
+    MediaPeer.prototype.sendSegmentAbsent = function (segmentId) {
+        this.sendCommand({ "command": MediaPeerCommands.SegmentAbsent, "segment_id": segmentId });
     };
-    MediaPeer.prototype.sendSegmentRequest = function (id) {
-        if (this.sendCommand({ "command": MediaPeerCommands.SegmentRequest, "id": id })) {
-            this.setResponseTimer(id);
-            this.segmentsPiecesData.set(id, []);
+    MediaPeer.prototype.requestSegment = function (segmentId) {
+        if (this.sendCommand({ "command": MediaPeerCommands.SegmentRequest, "segment_id": segmentId })) {
+            this.segmentsForDownload.add(segmentId);
             return true;
         }
         return false;
     };
-    MediaPeer.prototype.sendCancelSegmentRequest = function (id) {
-        this.segmentsPiecesData.delete(id);
-        return this.sendCommand({ "command": MediaPeerCommands.CancelSegmentRequest, "id": id });
-    };
-    MediaPeer.prototype.setResponseTimer = function (id) {
-        var _this = this;
-        var timer = this.requestSegmentResponseTimers.get(id);
-        if (timer) {
-            clearTimeout(timer);
+    MediaPeer.prototype.cancelSegmentRequest = function (segmentId) {
+        this.segmentsForDownload.delete(segmentId);
+        if (this.downloadingSegment && this.downloadingSegment.id == segmentId) {
+            this.downloadingSegment = null;
         }
-        // TODO: check MediaPeerEvents.DataSegmentAbsent
-        timer = setTimeout(function () {
-            _this.sendCancelSegmentRequest(id);
-            _this.segments.delete(id);
-            _this.emit(MediaPeerEvents.DataSegmentAbsent, _this, id);
-        }, this.requestSegmentResponseTimeout);
-        this.requestSegmentResponseTimers.set(id, timer);
-    };
-    MediaPeer.prototype.removeResponseTimer = function (url) {
-        var timer = this.requestSegmentResponseTimers.get(url);
-        if (timer) {
-            clearTimeout(timer);
-        }
+        return this.sendCommand({ "command": MediaPeerCommands.CancelSegmentRequest, "segment_id": segmentId });
     };
     return MediaPeer;
 }(events_1.EventEmitter));
 exports.MediaPeer = MediaPeer;
 
-}).call(this,require("buffer").Buffer)
-},{"./loader-interface":5,"buffer":60,"debug":70,"events":98}],7:[function(require,module,exports){
+},{"./loader-interface":5,"debug":70,"events":98}],7:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = Object.setPrototypeOf ||
@@ -792,10 +768,11 @@ var P2PMediaManager = /** @class */ (function (_super) {
         peer.on(media_peer_1.MediaPeerEvents.Connect, this.onPeerConnect.bind(this));
         peer.on(media_peer_1.MediaPeerEvents.Close, this.onPeerClose.bind(this));
         peer.on(media_peer_1.MediaPeerEvents.Error, this.onPeerError.bind(this));
-        peer.on(media_peer_1.MediaPeerEvents.DataSegmentsMap, this.onPeerDataSegmentsMap.bind(this));
-        peer.on(media_peer_1.MediaPeerEvents.DataSegmentRequest, this.onPeerDataSegmentRequest.bind(this));
-        peer.on(media_peer_1.MediaPeerEvents.DataSegmentLoaded, this.onPeerDataSegmentLoaded.bind(this));
-        peer.on(media_peer_1.MediaPeerEvents.DataSegmentAbsent, this.onPeerDataSegmentAbsent.bind(this));
+        peer.on(media_peer_1.MediaPeerEvents.SegmentsMap, this.onSegmentsMap.bind(this));
+        peer.on(media_peer_1.MediaPeerEvents.SegmentRequest, this.onSegmentRequest.bind(this));
+        peer.on(media_peer_1.MediaPeerEvents.SegmentLoaded, this.onSegmentLoaded.bind(this));
+        peer.on(media_peer_1.MediaPeerEvents.SegmentAbsent, this.onSegmentAbsent.bind(this));
+        peer.on(media_peer_1.MediaPeerEvents.SegmentError, this.onSegmentError.bind(this));
         peer.on(loader_interface_1.LoaderEvents.PieceBytesLoaded, this.onPieceBytesLoaded.bind(this));
         this.peers.set(trackerPeer.id, peer);
     };
@@ -805,7 +782,7 @@ var P2PMediaManager = /** @class */ (function (_super) {
         }
         var peer = Array.from(this.peers.values()).find(function (peer) {
             return (peer.getSegmentsMap().get(segment.id) === media_peer_1.MediaPeerSegmentStatus.Loaded) &&
-                peer.sendSegmentRequest(segment.id);
+                peer.requestSegment(segment.id);
         });
         if (peer) {
             this.debug("p2p segment download", segment.id, segment.url);
@@ -820,7 +797,7 @@ var P2PMediaManager = /** @class */ (function (_super) {
         if (peerSegmentRequest) {
             var peer = this.peers.get(peerSegmentRequest.peerId);
             if (peer) {
-                peer.sendCancelSegmentRequest(segment.id);
+                peer.cancelSegmentRequest(segment.id);
             }
             this.peerSegmentRequests.delete(segment.id);
             this.debug("p2p segment abort", segment.id, segment.url);
@@ -886,29 +863,37 @@ var P2PMediaManager = /** @class */ (function (_super) {
     P2PMediaManager.prototype.onPeerError = function (peer, error) {
         this.debug("onPeerError", peer, error);
     };
-    P2PMediaManager.prototype.onPeerDataSegmentsMap = function () {
+    P2PMediaManager.prototype.onSegmentsMap = function () {
         this.emit(P2PMediaManagerEvents.PeerDataUpdated);
     };
-    P2PMediaManager.prototype.onPeerDataSegmentRequest = function (peer, id) {
-        var segment = this.segments.get(id);
+    P2PMediaManager.prototype.onSegmentRequest = function (peer, segmentId) {
+        var segment = this.segments.get(segmentId);
         if (segment) {
             peer.sendSegmentData(segment);
         }
         else {
-            peer.sendSegmentAbsent(id);
+            peer.sendSegmentAbsent(segmentId);
         }
     };
-    P2PMediaManager.prototype.onPeerDataSegmentLoaded = function (peer, id, data) {
-        var peerSegmentRequest = this.peerSegmentRequests.get(id);
+    P2PMediaManager.prototype.onSegmentLoaded = function (peer, segmentId, data) {
+        var peerSegmentRequest = this.peerSegmentRequests.get(segmentId);
         if (peerSegmentRequest) {
-            this.peerSegmentRequests.delete(id);
-            this.emit(loader_interface_1.LoaderEvents.SegmentLoaded, id, peerSegmentRequest.segmentUrl, data);
+            this.peerSegmentRequests.delete(segmentId);
+            this.emit(loader_interface_1.LoaderEvents.SegmentLoaded, segmentId, peerSegmentRequest.segmentUrl, data);
             this.debug("p2p segment loaded", peerSegmentRequest.segmentUrl);
         }
     };
-    P2PMediaManager.prototype.onPeerDataSegmentAbsent = function (peer, id) {
-        this.peerSegmentRequests.delete(id);
+    P2PMediaManager.prototype.onSegmentAbsent = function (peer, segmentId) {
+        this.peerSegmentRequests.delete(segmentId);
         this.emit(P2PMediaManagerEvents.PeerDataUpdated);
+    };
+    P2PMediaManager.prototype.onSegmentError = function (peer, segmentId, description) {
+        var peerSegmentRequest = this.peerSegmentRequests.get(segmentId);
+        if (peerSegmentRequest) {
+            this.peerSegmentRequests.delete(segmentId);
+            this.emit(loader_interface_1.LoaderEvents.SegmentError, peerSegmentRequest.segmentUrl, description);
+            this.debug("p2p segment download failed", segmentId, description);
+        }
     };
     return P2PMediaManager;
 }(events_1.EventEmitter));
