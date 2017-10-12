@@ -91,8 +91,7 @@ var HttpLoader = /** @class */ (function (_super) {
         this.emit(loader_interface_1.LoaderEvents.PieceBytesLoaded, method, size, timestamp);
     };
     HttpLoader.prototype.onSegmentLoaded = function (id, url, data) {
-        var segment = new segment_internal_1.default(id, url);
-        segment.data = data;
+        var segment = new segment_internal_1.default(id, url, 0, data);
         this.segments.set(segment.id, segment);
         this.emitSegmentLoaded(segment);
         this.processSegmentQueue();
@@ -103,8 +102,7 @@ var HttpLoader = /** @class */ (function (_super) {
     };
     HttpLoader.prototype.emitSegmentLoaded = function (segmentInternal) {
         segmentInternal.lastAccessed = new Date().getTime();
-        var segment = new loader_interface_1.Segment(segmentInternal.url);
-        segment.data = segmentInternal.data.slice(0);
+        var segment = new loader_interface_1.Segment(segmentInternal.url, 0, segmentInternal.data);
         this.emit(loader_interface_1.LoaderEvents.SegmentLoaded, segment);
     };
     HttpLoader.prototype.collectGarbage = function () {
@@ -226,7 +224,7 @@ var HybridLoader = /** @class */ (function (_super) {
         _this.segments = new Map();
         _this.segmentsQueue = [];
         _this.debug = Debug("p2pml:hybrid-loader");
-        _this.lastSegmentProbabilityTimestamp = 0;
+        _this.httpDownloadProbabilityTimestamp = 0;
         _this.settings = {
             segmentIdGenerator: function (url) { return url; },
             cacheSegmentExpiration: 5 * 60 * 1000,
@@ -234,8 +232,8 @@ var HybridLoader = /** @class */ (function (_super) {
             requiredSegmentsCount: 2,
             useP2P: true,
             simultaneousP2PDownloads: 3,
-            lastSegmentProbability: 0.5,
-            lastSegmentProbabilityInterval: 1000,
+            httpDownloadProbability: 0.25,
+            httpDownloadProbabilityInterval: 500,
             bufferSegmentsCount: 20,
             trackerAnnounce: ["wss://tracker.btorrent.xyz/", "wss://tracker.openwebtorrent.com/"]
         };
@@ -359,11 +357,14 @@ var HybridLoader = /** @class */ (function (_super) {
                     if (this.httpManager.getActiveDownloads().size == 0) {
                         this.p2pManager.abort(segment);
                         this.httpManager.download(segment);
+                        this.debug("HTTP download (priority)", segment.priority, segment.url);
                         updateSegmentsMap = true;
                     }
                 }
                 else if (!this.httpManager.isDownloading(segment) && this.p2pManager.getActiveDownloadsCount() < this.settings.simultaneousP2PDownloads && downloadedSegmentsCount < this.settings.bufferSegmentsCount) {
-                    this.p2pManager.download(segment);
+                    if (this.p2pManager.download(segment)) {
+                        this.debug("P2P download", segment.priority, segment.url);
+                    }
                 }
             }
             if (this.httpManager.getActiveDownloads().size == 1 && this.p2pManager.getActiveDownloadsCount() == this.settings.simultaneousP2PDownloads) {
@@ -373,6 +374,13 @@ var HybridLoader = /** @class */ (function (_super) {
         if (this.httpManager.getActiveDownloads().size > 0) {
             return updateSegmentsMap;
         }
+        var now = Date.now();
+        if (now - this.httpDownloadProbabilityTimestamp < this.settings.httpDownloadProbabilityInterval) {
+            return updateSegmentsMap;
+        }
+        else {
+            this.httpDownloadProbabilityTimestamp = now;
+        }
         var pendingQueue = this.segmentsQueue.filter(function (segment) {
             return !_this.segments.has(segment.id) &&
                 !_this.p2pManager.isDownloading(segment);
@@ -381,22 +389,16 @@ var HybridLoader = /** @class */ (function (_super) {
         if (pendingQueue.length == 0 || downloadedSegmentsCount >= this.settings.bufferSegmentsCount) {
             return updateSegmentsMap;
         }
-        var now = Date.now();
-        if (now - this.lastSegmentProbabilityTimestamp < this.settings.lastSegmentProbabilityInterval) {
-            return updateSegmentsMap;
-        }
-        else {
-            this.lastSegmentProbabilityTimestamp = now;
-        }
         var segmentsMap = this.p2pManager.getOvrallSegmentsMap();
         pendingQueue = pendingQueue.filter(function (segment) { return !segmentsMap.get(segment.id); });
         if (pendingQueue.length == 0) {
             return updateSegmentsMap;
         }
-        if (Math.random() <= this.settings.lastSegmentProbability) {
-            this.debug("Random HTTP download:");
+        if (Math.random() <= this.settings.httpDownloadProbability) {
             var random_index = Math.floor(Math.random() * Math.min(pendingQueue.length, this.settings.bufferSegmentsCount));
-            this.httpManager.download(pendingQueue[random_index]);
+            var segment = pendingQueue[random_index];
+            this.debug("HTTP download (random)", segment.priority, segment.url);
+            this.httpManager.download(segment);
             updateSegmentsMap = true;
         }
         return updateSegmentsMap;
@@ -405,8 +407,7 @@ var HybridLoader = /** @class */ (function (_super) {
         this.emit(loader_interface_1.LoaderEvents.PieceBytesLoaded, method, size, timestamp);
     };
     HybridLoader.prototype.onSegmentLoaded = function (id, url, data) {
-        var segment = new segment_internal_1.default(id, url);
-        segment.data = data;
+        var segment = new segment_internal_1.default(id, url, 0, data);
         this.segments.set(id, segment);
         this.emitSegmentLoaded(segment);
         this.processSegmentsQueue();
@@ -418,8 +419,7 @@ var HybridLoader = /** @class */ (function (_super) {
     };
     HybridLoader.prototype.emitSegmentLoaded = function (segmentInternal) {
         segmentInternal.lastAccessed = new Date().getTime();
-        var segment = new loader_interface_1.Segment(segmentInternal.url);
-        segment.data = segmentInternal.data.slice(0);
+        var segment = new loader_interface_1.Segment(segmentInternal.url, 0, segmentInternal.data);
         this.emit(loader_interface_1.LoaderEvents.SegmentLoaded, segment);
         this.debug("emitSegmentLoaded", segment.url);
     };
@@ -465,10 +465,12 @@ exports.default = HybridLoader;
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Segment = /** @class */ (function () {
-    function Segment(url, priority) {
+    function Segment(url, priority, data) {
         if (priority === void 0) { priority = 0; }
+        if (data === void 0) { data = undefined; }
         this.url = url;
         this.priority = priority;
+        this.data = data;
     }
     return Segment;
 }());
@@ -499,6 +501,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 var events_1 = require("events");
 var loader_interface_1 = require("./loader-interface");
 var Debug = require("debug");
+var Buffer = require("buffer").Buffer;
 var MediaPeerCommands;
 (function (MediaPeerCommands) {
     MediaPeerCommands["SegmentData"] = "segment_data";
@@ -517,6 +520,7 @@ var MediaPeerEvents;
     MediaPeerEvents["SegmentLoaded"] = "peer_segment_loaded";
     MediaPeerEvents["SegmentAbsent"] = "peer_segment_absent";
     MediaPeerEvents["SegmentError"] = "peer_segment_error";
+    MediaPeerEvents["SegmentTimeout"] = "peer_segment_timeout";
 })(MediaPeerEvents = exports.MediaPeerEvents || (exports.MediaPeerEvents = {}));
 var MediaPeerSegmentStatus;
 (function (MediaPeerSegmentStatus) {
@@ -533,14 +537,16 @@ var DownloadingSegment = /** @class */ (function () {
     return DownloadingSegment;
 }());
 var MAX_MESSAGE_SIZE = 16 * 1024;
+var RESPONSE_TIMEOUT = 3000;
 var MediaPeer = /** @class */ (function (_super) {
     __extends(MediaPeer, _super);
     function MediaPeer(peer) {
         var _this = _super.call(this) || this;
+        _this.downloadingSegmentId = null;
         _this.downloadingSegment = null;
-        _this.segmentsForDownload = new Set();
         _this.segmentsMap = new Map();
         _this.debug = Debug("p2pml:media-peer");
+        _this.timer = null;
         _this.peer = peer;
         _this.peer.on("connect", function () { return _this.onPeerConnect(); });
         _this.peer.on("close", function () { return _this.onPeerClose(); });
@@ -554,50 +560,59 @@ var MediaPeer = /** @class */ (function (_super) {
         this.emit(MediaPeerEvents.Connect, this);
     };
     MediaPeer.prototype.onPeerClose = function () {
+        this.terminateSegmentRequest();
         this.emit(MediaPeerEvents.Close, this);
     };
     MediaPeer.prototype.onPeerError = function (error) {
         this.emit(MediaPeerEvents.Error, this, error);
     };
-    MediaPeer.prototype.onPeerData = function (data) {
+    MediaPeer.prototype.receiveSegmentPiece = function (data) {
+        if (!this.downloadingSegment) {
+            // The segment was not requested or canceled
+            return;
+        }
+        this.downloadingSegment.bytesDownloaded += data.byteLength;
+        this.downloadingSegment.pieces.push(data);
+        this.emit(loader_interface_1.LoaderEvents.PieceBytesLoaded, "p2p", data.byteLength, Date.now());
+        var segmentId = this.downloadingSegment.id;
+        if (this.downloadingSegment.bytesDownloaded == this.downloadingSegment.size) {
+            var segmentData = new Uint8Array(this.downloadingSegment.size);
+            var offset = 0;
+            for (var _i = 0, _a = this.downloadingSegment.pieces; _i < _a.length; _i++) {
+                var piece = _a[_i];
+                segmentData.set(new Uint8Array(piece), offset);
+                offset += piece.byteLength;
+            }
+            this.terminateSegmentRequest();
+            this.emit(MediaPeerEvents.SegmentLoaded, this, segmentId, segmentData.buffer);
+        }
+        else if (this.downloadingSegment.bytesDownloaded > this.downloadingSegment.size) {
+            this.terminateSegmentRequest();
+            this.emit(MediaPeerEvents.SegmentError, this, segmentId, "Too many bytes received for segment");
+        }
+    };
+    MediaPeer.prototype.getJsonCommand = function (data) {
         var bytes = new Uint8Array(data);
-        var command = null;
-        // JSON string check by first, second and last characters: '{" .... }'
+        // Serialized JSON string check by first, second and last characters: '{" .... }'
         if (bytes[0] == 123 && bytes[1] == 34 && bytes[data.byteLength - 1] == 125) {
             try {
-                command = JSON.parse(new TextDecoder("utf-8").decode(data));
+                return JSON.parse(new TextDecoder("utf-8").decode(data));
             }
             catch (_a) {
             }
         }
+        return null;
+    };
+    MediaPeer.prototype.onPeerData = function (data) {
+        var command = this.getJsonCommand(data);
         if (command == null) {
-            if (!this.downloadingSegment) {
-                // The segment was not requested or canceled
-                return;
-            }
-            this.downloadingSegment.bytesDownloaded += data.byteLength;
-            this.downloadingSegment.pieces.push(data);
-            this.emit(loader_interface_1.LoaderEvents.PieceBytesLoaded, "p2p", data.byteLength, Date.now());
-            if (this.downloadingSegment.bytesDownloaded == this.downloadingSegment.size) {
-                var segmentData = new Uint8Array(this.downloadingSegment.size);
-                var offset = 0;
-                for (var _i = 0, _b = this.downloadingSegment.pieces; _i < _b.length; _i++) {
-                    var piece = _b[_i];
-                    segmentData.set(new Uint8Array(piece), offset);
-                    offset += piece.byteLength;
-                }
-                this.emit(MediaPeerEvents.SegmentLoaded, this, this.downloadingSegment.id, segmentData.buffer);
-                this.downloadingSegment = null;
-            }
-            else if (this.downloadingSegment.bytesDownloaded > this.downloadingSegment.size) {
-                this.emit(MediaPeerEvents.SegmentError, this, this.downloadingSegment.id, "Too many bytes received for segment");
-                this.downloadingSegment = null;
-            }
+            this.receiveSegmentPiece(data);
             return;
         }
         if (this.downloadingSegment) {
-            this.emit(MediaPeerEvents.SegmentError, this, this.downloadingSegment.id, "Segment download interrupted by a command");
-            this.downloadingSegment = null;
+            var segmentId = this.downloadingSegment.id;
+            this.terminateSegmentRequest();
+            this.emit(MediaPeerEvents.SegmentError, this, segmentId, "Segment download is interrupted by a command");
             return;
         }
         switch (command.command) {
@@ -609,15 +624,17 @@ var MediaPeer = /** @class */ (function (_super) {
                 this.emit(MediaPeerEvents.SegmentRequest, this, command.segment_id);
                 break;
             case MediaPeerCommands.SegmentData:
-                if (this.segmentsForDownload.has(command.segment_id)) {
+                if (this.downloadingSegmentId === command.segment_id) {
                     this.downloadingSegment = new DownloadingSegment(command.segment_id, command.segment_size);
-                    this.segmentsForDownload.delete(command.segment_id);
+                    this.cancelResponseTimeoutTimer();
                 }
                 break;
             case MediaPeerCommands.SegmentAbsent:
-                this.segmentsForDownload.delete(command.segment_id);
-                this.segmentsMap.delete(command.segment_id);
-                this.emit(MediaPeerEvents.SegmentAbsent, this, command.segment_id);
+                if (this.downloadingSegmentId === command.segment_id) {
+                    this.terminateSegmentRequest();
+                    this.segmentsMap.delete(command.segment_id);
+                    this.emit(MediaPeerEvents.SegmentAbsent, this, command.segment_id);
+                }
                 break;
             case MediaPeerCommands.CancelSegmentRequest:
                 // TODO: peer stop sending buffer
@@ -639,9 +656,13 @@ var MediaPeer = /** @class */ (function (_super) {
         return false;
     };
     MediaPeer.prototype.destroy = function () {
+        this.terminateSegmentRequest();
         if (this.peer.connected) {
             this.peer.destroy();
         }
+    };
+    MediaPeer.prototype.getDownloadingSegmentId = function () {
+        return this.downloadingSegmentId;
     };
     MediaPeer.prototype.getSegmentsMap = function () {
         return this.segmentsMap;
@@ -649,16 +670,17 @@ var MediaPeer = /** @class */ (function (_super) {
     MediaPeer.prototype.sendSegmentsMap = function (segments) {
         this.sendCommand({ "command": MediaPeerCommands.SegmentsMap, "segments": segments });
     };
-    MediaPeer.prototype.sendSegmentData = function (segment) {
+    MediaPeer.prototype.sendSegmentData = function (segmentId, data) {
         this.sendCommand({
             "command": MediaPeerCommands.SegmentData,
-            "segment_id": segment.id,
-            "segment_size": segment.data.byteLength
+            "segment_id": segmentId,
+            "segment_size": data.byteLength
         });
-        var bytesLeft = segment.data.byteLength;
+        var bytesLeft = data.byteLength;
         while (bytesLeft > 0) {
             var bytesToSend = (bytesLeft >= MAX_MESSAGE_SIZE ? MAX_MESSAGE_SIZE : bytesLeft);
-            this.peer.write(new Uint8Array(segment.data, segment.data.byteLength - bytesLeft, bytesToSend));
+            // Using Buffer.from because TypedArrays as input to this function cause memory copying
+            this.peer.write(Buffer.from(data, data.byteLength - bytesLeft, bytesToSend));
             bytesLeft -= bytesToSend;
         }
     };
@@ -666,24 +688,51 @@ var MediaPeer = /** @class */ (function (_super) {
         this.sendCommand({ "command": MediaPeerCommands.SegmentAbsent, "segment_id": segmentId });
     };
     MediaPeer.prototype.requestSegment = function (segmentId) {
+        if (this.downloadingSegmentId) {
+            throw new Error("A segment is already downloading: " + this.downloadingSegmentId);
+        }
         if (this.sendCommand({ "command": MediaPeerCommands.SegmentRequest, "segment_id": segmentId })) {
-            this.segmentsForDownload.add(segmentId);
+            this.downloadingSegmentId = segmentId;
+            this.runResponseTimeoutTimer();
             return true;
         }
         return false;
     };
-    MediaPeer.prototype.cancelSegmentRequest = function (segmentId) {
-        this.segmentsForDownload.delete(segmentId);
-        if (this.downloadingSegment && this.downloadingSegment.id == segmentId) {
-            this.downloadingSegment = null;
+    MediaPeer.prototype.cancelSegmentRequest = function () {
+        if (this.downloadingSegmentId) {
+            var segmentId = this.downloadingSegmentId;
+            this.terminateSegmentRequest();
+            this.sendCommand({ "command": MediaPeerCommands.CancelSegmentRequest, "segment_id": segmentId });
         }
-        return this.sendCommand({ "command": MediaPeerCommands.CancelSegmentRequest, "segment_id": segmentId });
+    };
+    MediaPeer.prototype.runResponseTimeoutTimer = function () {
+        var _this = this;
+        this.timer = setTimeout(function () {
+            _this.timer = null;
+            if (!_this.downloadingSegmentId) {
+                return;
+            }
+            var segmentId = _this.downloadingSegmentId;
+            _this.cancelSegmentRequest();
+            _this.emit(MediaPeerEvents.SegmentTimeout, _this, segmentId); // TODO: send peer not responding event
+        }, RESPONSE_TIMEOUT);
+    };
+    MediaPeer.prototype.cancelResponseTimeoutTimer = function () {
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
+        }
+    };
+    MediaPeer.prototype.terminateSegmentRequest = function () {
+        this.downloadingSegmentId = null;
+        this.downloadingSegment = null;
+        this.cancelResponseTimeoutTimer();
     };
     return MediaPeer;
 }(events_1.EventEmitter));
 exports.MediaPeer = MediaPeer;
 
-},{"./loader-interface":5,"debug":70,"events":98}],7:[function(require,module,exports){
+},{"./loader-interface":5,"buffer":60,"debug":70,"events":98}],7:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = Object.setPrototypeOf ||
@@ -773,31 +822,32 @@ var P2PMediaManager = /** @class */ (function (_super) {
         peer.on(media_peer_1.MediaPeerEvents.SegmentLoaded, this.onSegmentLoaded.bind(this));
         peer.on(media_peer_1.MediaPeerEvents.SegmentAbsent, this.onSegmentAbsent.bind(this));
         peer.on(media_peer_1.MediaPeerEvents.SegmentError, this.onSegmentError.bind(this));
+        peer.on(media_peer_1.MediaPeerEvents.SegmentTimeout, this.onSegmentTimeout.bind(this));
         peer.on(loader_interface_1.LoaderEvents.PieceBytesLoaded, this.onPieceBytesLoaded.bind(this));
         this.peers.set(trackerPeer.id, peer);
     };
     P2PMediaManager.prototype.download = function (segment) {
         if (this.isDownloading(segment)) {
-            return;
+            return false;
         }
         var peer = Array.from(this.peers.values()).find(function (peer) {
-            return (peer.getSegmentsMap().get(segment.id) === media_peer_1.MediaPeerSegmentStatus.Loaded) &&
+            return (peer.getDownloadingSegmentId() == null) &&
+                (peer.getSegmentsMap().get(segment.id) === media_peer_1.MediaPeerSegmentStatus.Loaded) &&
                 peer.requestSegment(segment.id);
         });
         if (peer) {
-            this.debug("p2p segment download", segment.id, segment.url);
             this.peerSegmentRequests.set(segment.id, new PeerSegmentRequest(peer.id, segment.url));
+            this.debug("p2p segment download", segment.id, segment.url);
+            return true;
         }
-        else {
-            //this.debug("p2p segment not found", segment.id);
-        }
+        return false;
     };
     P2PMediaManager.prototype.abort = function (segment) {
         var peerSegmentRequest = this.peerSegmentRequests.get(segment.id);
         if (peerSegmentRequest) {
             var peer = this.peers.get(peerSegmentRequest.peerId);
             if (peer) {
-                peer.cancelSegmentRequest(segment.id);
+                peer.cancelSegmentRequest();
             }
             this.peerSegmentRequests.delete(segment.id);
             this.debug("p2p segment abort", segment.id, segment.url);
@@ -847,17 +897,13 @@ var P2PMediaManager = /** @class */ (function (_super) {
     };
     P2PMediaManager.prototype.onPeerClose = function (peer) {
         var _this = this;
-        var isUpdated = false;
         this.peerSegmentRequests.forEach(function (value, key) {
             if (value.peerId === peer.id) {
                 _this.peerSegmentRequests.delete(key);
-                isUpdated = true;
             }
         });
         this.peers.delete(peer.id);
-        if (isUpdated) {
-            this.emit(P2PMediaManagerEvents.PeerDataUpdated);
-        }
+        this.emit(P2PMediaManagerEvents.PeerDataUpdated);
         this.emit(media_peer_1.MediaPeerEvents.Close, peer.id);
     };
     P2PMediaManager.prototype.onPeerError = function (peer, error) {
@@ -869,7 +915,7 @@ var P2PMediaManager = /** @class */ (function (_super) {
     P2PMediaManager.prototype.onSegmentRequest = function (peer, segmentId) {
         var segment = this.segments.get(segmentId);
         if (segment) {
-            peer.sendSegmentData(segment);
+            peer.sendSegmentData(segmentId, segment.data);
         }
         else {
             peer.sendSegmentAbsent(segmentId);
@@ -895,6 +941,17 @@ var P2PMediaManager = /** @class */ (function (_super) {
             this.debug("p2p segment download failed", segmentId, description);
         }
     };
+    P2PMediaManager.prototype.onSegmentTimeout = function (peer, segmentId) {
+        var peerSegmentRequest = this.peerSegmentRequests.get(segmentId);
+        if (peerSegmentRequest) {
+            this.peerSegmentRequests.delete(segmentId);
+            peer.destroy();
+            if (this.peers.delete(peerSegmentRequest.peerId)) {
+                this.emit(P2PMediaManagerEvents.PeerDataUpdated);
+            }
+            this.debug("p2p segment download timeout", segmentId);
+        }
+    };
     return P2PMediaManager;
 }(events_1.EventEmitter));
 exports.P2PMediaManager = P2PMediaManager;
@@ -903,11 +960,14 @@ exports.P2PMediaManager = P2PMediaManager;
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var SegmentInternal = /** @class */ (function () {
-    function SegmentInternal(id, url, priority) {
+    function SegmentInternal(id, url, priority, data) {
         if (priority === void 0) { priority = 0; }
+        if (data === void 0) { data = undefined; }
         this.id = id;
         this.url = url;
         this.priority = priority;
+        this.data = data;
+        this.lastAccessed = 0;
     }
     return SegmentInternal;
 }());
