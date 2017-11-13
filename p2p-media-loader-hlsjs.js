@@ -1507,7 +1507,13 @@ function initHlsJsPlayer(player) {
 }
 exports.initHlsJsPlayer = initHlsJsPlayer;
 function initClapprPlayer(player) {
-    player.on("play", function () { return initHlsJsPlayer(player.core.getCurrentPlayback()._hls); });
+    player.on("play", function () {
+        var playback = player.core.getCurrentPlayback();
+        if (playback._hls && !playback._hls._p2pm_linitialized) {
+            playback._hls._p2pm_linitialized = true;
+            initHlsJsPlayer(player.core.getCurrentPlayback()._hls);
+        }
+    });
 }
 exports.initClapprPlayer = initClapprPlayer;
 function initFlowplayerHlsJsPlayer(player) {
