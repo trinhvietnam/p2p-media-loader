@@ -7,6 +7,10 @@ window.p2pml.hlsjs = require("p2p-media-loader-hlsjs");
 
 },{"p2p-media-loader-hlsjs":"p2p-media-loader-hlsjs"}],2:[function(require,module,exports){
 function createHlsJsLoaderClass(HlsJsLoader, segmentManager) {
+	if (!segmentManager.isSupported()) {
+		return Hls.DefaultConfig.loader;
+	}
+
     function HlsJsLoaderClass(settings) {
         this.impl = new HlsJsLoader(segmentManager, settings);
         this.stats = this.impl.stats;
@@ -31,15 +35,17 @@ function createHlsJsLoaderClass(HlsJsLoader, segmentManager) {
     return HlsJsLoaderClass;
 }
 
-module.exports = createHlsJsLoaderClass;
+module.exports.createHlsJsLoaderClass = createHlsJsLoaderClass;
 
 },{}],3:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+var DEFAULT_DOWNLOAD_LATENCY = 1;
+var DEFAULT_DOWNLOAD_SPEED = 12500; // bytes per millisecond
 var HlsJsLoader = /** @class */ (function () {
-    function HlsJsLoader(segmentManager, settings_unused) {
+    function HlsJsLoader(segmentManager, settings) {
+        this.stats = {}; // required for older versions of hls.js
         this.segmentManager = segmentManager;
-        this.stats = {};
     }
     HlsJsLoader.prototype.load = function (context, config_unused, callbacks) {
         var _this = this;
@@ -48,11 +54,11 @@ var HlsJsLoader = /** @class */ (function () {
         this.url = context.url;
         if (context.type) {
             this.segmentManager.loadPlaylist(this.url, context.type)
-                .then(function (content) { _this.success(content); })
-                .catch(function (error) { _this.error(error); });
+                .then(function (content) { return _this.successPlaylist(content); })
+                .catch(function (error) { return _this.error(error); });
         }
         else if (context.frag) {
-            this.segmentManager.loadSegment(this.url, function (content) { setTimeout(function () { _this.success(content); }, 0); }, function (error) { setTimeout(function () { _this.error(error); }, 0); });
+            this.segmentManager.loadSegment(this.url, function (content, downloadSpeed) { return setTimeout(function () { return _this.successSegment(content, downloadSpeed); }, 0); }, function (error) { return setTimeout(function () { return _this.error(error); }, 0); });
         }
         else {
             console.warn("Unknown load request", context);
@@ -64,14 +70,24 @@ var HlsJsLoader = /** @class */ (function () {
     HlsJsLoader.prototype.destroy = function () {
         this.abort();
     };
-    HlsJsLoader.prototype.success = function (content) {
-        // todo: report correct loading stats when they will be reported by the manager
-        this.stats.trequest = performance.now();
-        this.stats.tfirst = this.stats.trequest + 500;
-        this.stats.tload = this.stats.trequest + 500;
-        this.stats.loaded = content instanceof ArrayBuffer
-            ? content.byteLength
-            : content.length;
+    HlsJsLoader.prototype.successPlaylist = function (content) {
+        var now = performance.now();
+        this.stats.trequest = now - 300;
+        this.stats.tfirst = now - 200;
+        this.stats.tload = now;
+        this.stats.loaded = content.length;
+        this.callbacks.onSuccess({
+            url: this.url,
+            data: content
+        }, this.stats, this.context);
+    };
+    HlsJsLoader.prototype.successSegment = function (content, downloadSpeed) {
+        var now = performance.now();
+        var downloadTime = content.byteLength / ((downloadSpeed <= 0) ? DEFAULT_DOWNLOAD_SPEED : downloadSpeed);
+        this.stats.trequest = now - DEFAULT_DOWNLOAD_LATENCY - downloadTime;
+        this.stats.tfirst = now - downloadTime;
+        this.stats.tload = now;
+        this.stats.loaded = content.byteLength;
         this.callbacks.onSuccess({
             url: this.url,
             data: content
@@ -124,7 +140,7 @@ var __generator = (this && this.__generator) || function (thisArg, body) {
 Object.defineProperty(exports, "__esModule", { value: true });
 var p2p_media_loader_core_1 = require("p2p-media-loader-core");
 var utils_1 = require("./utils");
-var m3u8Parser = require("m3u8-parser");
+var m3u8_parser_1 = require("m3u8-parser");
 var SegmentManager = /** @class */ (function () {
     function SegmentManager(loader) {
         this.playlists = new Map();
@@ -136,8 +152,11 @@ var SegmentManager = /** @class */ (function () {
         this.loader.on(p2p_media_loader_core_1.LoaderEvents.SegmentError, this.onSegmentError.bind(this));
         this.loader.on(p2p_media_loader_core_1.LoaderEvents.SegmentAbort, this.onSegmentAbort.bind(this));
     }
+    SegmentManager.prototype.isSupported = function () {
+        return this.loader.isSupported();
+    };
     SegmentManager.prototype.processPlaylist = function (url, type, content) {
-        var parser = new m3u8Parser.Parser();
+        var parser = new m3u8_parser_1.Parser();
         parser.push(content);
         parser.end();
         var playlist = new Playlist(url, type, parser.manifest);
@@ -151,28 +170,24 @@ var SegmentManager = /** @class */ (function () {
             return __generator(this, function (_b) {
                 switch (_b.label) {
                     case 0:
-                        content = "";
-                        _b.label = 1;
+                        _b.trys.push([0, 2, , 3]);
+                        return [4 /*yield*/, utils_1.default.fetchContentAsText(url)];
                     case 1:
-                        _b.trys.push([1, 3, , 4]);
-                        return [4 /*yield*/, utils_1.default.fetchContent(url)];
-                    case 2:
                         content = _b.sent();
                         this.processPlaylist(url, type, content);
                         this.setCurrentSegment();
-                        return [3 /*break*/, 4];
-                    case 3:
+                        return [3 /*break*/, 3];
+                    case 2:
                         e_1 = _b.sent();
                         this.playlists.delete(url);
                         throw e_1;
-                    case 4:
+                    case 3:
                         if (loadChildPlaylists) {
                             playlist = this.playlists.get(url);
                             if (playlist) {
                                 _loop_1 = function (childUrl) {
-                                    utils_1.default.fetchContent(childUrl).then(function (childContent) {
-                                        _this.processPlaylist(childUrl, "level", childContent);
-                                    });
+                                    utils_1.default.fetchContentAsText(childUrl)
+                                        .then(function (childContent) { return _this.processPlaylist(childUrl, "level", childContent); });
                                 };
                                 for (_i = 0, _a = playlist.getChildPlaylistAbsoluteUrls(); _i < _a.length; _i++) {
                                     childUrl = _a[_i];
@@ -185,20 +200,9 @@ var SegmentManager = /** @class */ (function () {
             });
         });
     };
-    SegmentManager.prototype.loadSegment = function (url, onSuccess, onError, playlistMissRetries) {
-        var _this = this;
-        if (playlistMissRetries === void 0) { playlistMissRetries = 1; }
+    SegmentManager.prototype.loadSegment = function (url, onSuccess, onError) {
         var _a = this.getSegmentLocation(url), loadingPlaylist = _a.playlist, loadingSegmentIndex = _a.segmentIndex;
-        if (!loadingPlaylist) {
-            if (playlistMissRetries > 0) {
-                setTimeout(function () { _this.loadSegment(url, onSuccess, onError, playlistMissRetries - 1); }, 500);
-            }
-            else {
-                this.fetchSegment(url, onSuccess, onError);
-            }
-            return;
-        }
-        if (loadingPlaylist.type !== "level") {
+        if (!loadingPlaylist || loadingPlaylist.type !== "level") {
             this.fetchSegment(url, onSuccess, onError);
             return;
         }
@@ -245,7 +249,7 @@ var SegmentManager = /** @class */ (function () {
         if (this.task && this.task.url === segment.url) {
             this.playQueue.push(segment.url);
             if (this.task.onSuccess) {
-                this.task.onSuccess(segment.data.slice(0));
+                this.task.onSuccess(segment.data.slice(0), segment.downloadSpeed);
             }
             this.task = undefined;
         }
@@ -307,11 +311,12 @@ var SegmentManager = /** @class */ (function () {
                 return playlist;
             }
         }
+        return undefined;
     };
     SegmentManager.prototype.fetchSegment = function (url, onSuccess, onError) {
-        utils_1.default.fetchContent(url, "arraybuffer").then(function (content) {
+        utils_1.default.fetchContentAsArrayBuffer(url).then(function (content) {
             if (onSuccess) {
-                onSuccess(content);
+                onSuccess(content, 0);
             }
         }).catch(function (error) {
             if (onError) {
@@ -409,8 +414,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 var Utils = /** @class */ (function () {
     function Utils() {
     }
-    Utils.fetchContent = function (url, responseType) {
-        if (responseType === void 0) { responseType = ""; }
+    Utils.fetchContentAsAny = function (url, responseType) {
         return __awaiter(this, void 0, void 0, function () {
             return __generator(this, function (_a) {
                 return [2 /*return*/, new Promise(function (resolve, reject) {
@@ -422,12 +426,7 @@ var Utils = /** @class */ (function () {
                                 return;
                             }
                             if (xhr.status >= 200 && xhr.status < 300) {
-                                if (xhr.responseType === "arraybuffer") {
-                                    resolve(xhr.response);
-                                }
-                                else {
-                                    resolve(xhr.responseText);
-                                }
+                                resolve(xhr.response);
                             }
                             else {
                                 reject(xhr.statusText);
@@ -435,6 +434,20 @@ var Utils = /** @class */ (function () {
                         };
                         xhr.send();
                     })];
+            });
+        });
+    };
+    Utils.fetchContentAsText = function (url) {
+        return __awaiter(this, void 0, void 0, function () {
+            return __generator(this, function (_a) {
+                return [2 /*return*/, Utils.fetchContentAsAny(url, "text")];
+            });
+        });
+    };
+    Utils.fetchContentAsArrayBuffer = function (url) {
+        return __awaiter(this, void 0, void 0, function () {
+            return __generator(this, function (_a) {
+                return [2 /*return*/, Utils.fetchContentAsAny(url, "arraybuffer")];
             });
         });
     };
@@ -1471,7 +1484,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 var p2p_media_loader_core_1 = require("p2p-media-loader-core");
 var segment_manager_1 = require("./segment-manager");
 var hlsjs_loader_1 = require("./hlsjs-loader");
-var createHlsJsLoaderClass = require("./hlsjs-loader-class");
+var hlsjs_loader_class_1 = require("./hlsjs-loader-class");
 function initHlsJsEvents(player, segmentManager) {
     player.on("hlsFragChanged", function (event, data) {
         var url = data && data.frag ? data.frag.url : undefined;
@@ -1484,7 +1497,7 @@ function initHlsJsEvents(player, segmentManager) {
 function createLoaderClass(settings) {
     if (settings === void 0) { settings = {}; }
     var manager = settings.segmentManager || new segment_manager_1.default(new p2p_media_loader_core_1.HybridLoader(settings.loaderSettings));
-    return createHlsJsLoaderClass(hlsjs_loader_1.default, manager);
+    return hlsjs_loader_class_1.createHlsJsLoaderClass(hlsjs_loader_1.default, manager);
 }
 exports.createLoaderClass = createLoaderClass;
 function initHlsJsPlayer(player) {
@@ -1494,15 +1507,11 @@ function initHlsJsPlayer(player) {
 }
 exports.initHlsJsPlayer = initHlsJsPlayer;
 function initClapprPlayer(player) {
-    player.on("play", function () {
-        initHlsJsPlayer(player.core.getCurrentPlayback()._hls);
-    });
+    player.on("play", function () { return initHlsJsPlayer(player.core.getCurrentPlayback()._hls); });
 }
 exports.initClapprPlayer = initClapprPlayer;
 function initFlowplayerHlsJsPlayer(player) {
-    player.on("ready", function () {
-        initHlsJsPlayer(player.engine.hlsjs);
-    });
+    player.on("ready", function () { return initHlsJsPlayer(player.engine.hlsjs); });
 }
 exports.initFlowplayerHlsJsPlayer = initFlowplayerHlsJsPlayer;
 function initVideoJsContribHlsJsPlayer(player) {
