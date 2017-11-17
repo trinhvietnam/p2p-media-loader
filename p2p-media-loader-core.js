@@ -675,9 +675,7 @@ var MediaPeer = /** @class */ (function (_super) {
     };
     MediaPeer.prototype.destroy = function () {
         this.terminateSegmentRequest();
-        if (this.peer.connected) {
-            this.peer.destroy();
-        }
+        this.peer.destroy();
     };
     MediaPeer.prototype.getDownloadingSegmentId = function () {
         return this.downloadingSegmentId;
@@ -784,7 +782,9 @@ var P2PMediaManager = /** @class */ (function (_super) {
     __extends(P2PMediaManager, _super);
     function P2PMediaManager(segments, announce) {
         var _this = _super.call(this) || this;
+        _this.trackerClient = null;
         _this.peers = new Map();
+        _this.peerCandidates = new Map();
         _this.peerSegmentRequests = new Map();
         _this.debug = Debug("p2pml:p2p-media-manager");
         _this.announce = announce;
@@ -797,14 +797,9 @@ var P2PMediaManager = /** @class */ (function (_super) {
         if (this.swarmId == id) {
             return;
         }
+        this.destroy();
         this.swarmId = id;
         this.debug("swarm", this.swarmId);
-        if (this.trackerClient) {
-            this.trackerClient.stop();
-            this.trackerClient.destroy();
-        }
-        this.peers.forEach(function (peer) { return peer.destroy(); });
-        this.peers.clear();
         this.createClient(crypto_1.createHash("sha1").update(id).digest("hex"));
     };
     P2PMediaManager.prototype.createClient = function (infoHash) {
@@ -826,7 +821,7 @@ var P2PMediaManager = /** @class */ (function (_super) {
     };
     P2PMediaManager.prototype.onClientPeer = function (trackerPeer) {
         if (this.peers.has(trackerPeer.id)) {
-            //this.debug("peer exists");
+            trackerPeer.destroy();
             return;
         }
         var peer = new media_peer_1.MediaPeer(trackerPeer);
@@ -840,7 +835,12 @@ var P2PMediaManager = /** @class */ (function (_super) {
         peer.on(media_peer_1.MediaPeerEvents.SegmentError, this.onSegmentError.bind(this));
         peer.on(media_peer_1.MediaPeerEvents.SegmentTimeout, this.onSegmentTimeout.bind(this));
         peer.on(loader_interface_1.LoaderEvents.PieceBytesLoaded, this.onPieceBytesLoaded.bind(this));
-        this.peers.set(trackerPeer.id, peer);
+        var peerCandidatesById = this.peerCandidates.get(peer.id);
+        if (!peerCandidatesById) {
+            peerCandidatesById = [];
+            this.peerCandidates.set(peer.id, peerCandidatesById);
+        }
+        peerCandidatesById.push(peer);
     };
     P2PMediaManager.prototype.download = function (segment) {
         if (this.isDownloading(segment)) {
@@ -879,10 +879,18 @@ var P2PMediaManager = /** @class */ (function (_super) {
         if (this.trackerClient) {
             this.trackerClient.stop();
             this.trackerClient.destroy();
+            this.trackerClient = null;
         }
         this.peers.forEach(function (peer) { return peer.destroy(); });
         this.peers.clear();
         this.peerSegmentRequests.clear();
+        this.peerCandidates.forEach(function (peerCandidateById) {
+            for (var _i = 0, peerCandidateById_1 = peerCandidateById; _i < peerCandidateById_1.length; _i++) {
+                var peerCandidate = peerCandidateById_1[_i];
+                peerCandidate.destroy();
+            }
+        });
+        this.peerCandidates.clear();
     };
     P2PMediaManager.prototype.sendSegmentsMapToAll = function (segmentsMap) {
         this.peers.forEach(function (peer) { return peer.sendSegmentsMap(segmentsMap); });
@@ -909,12 +917,43 @@ var P2PMediaManager = /** @class */ (function (_super) {
         this.emit(loader_interface_1.LoaderEvents.PieceBytesLoaded, method, size);
     };
     P2PMediaManager.prototype.onPeerConnect = function (peer) {
-        this.emit(media_peer_1.MediaPeerEvents.Connect, { id: peer.id, remoteAddress: peer.remoteAddress });
+        var connectedPeer = this.peers.get(peer.id);
+        // First peer with the ID connected
+        if (!connectedPeer) {
+            this.peers.set(peer.id, peer);
+            // Destroy all other peer candidates
+            var peerCandidatesById = this.peerCandidates.get(peer.id);
+            if (peerCandidatesById) {
+                for (var _i = 0, peerCandidatesById_1 = peerCandidatesById; _i < peerCandidatesById_1.length; _i++) {
+                    var peerCandidate = peerCandidatesById_1[_i];
+                    if (peerCandidate != peer) {
+                        peerCandidate.destroy();
+                    }
+                }
+                this.peerCandidates.delete(peer.id);
+            }
+            this.emit(media_peer_1.MediaPeerEvents.Connect, { id: peer.id, remoteAddress: peer.remoteAddress });
+        }
     };
     P2PMediaManager.prototype.onPeerClose = function (peer) {
         var _this = this;
+        if (this.peers.get(peer.id) != peer) {
+            // Try to delete the peer candidate
+            var peerCandidatesById = this.peerCandidates.get(peer.id);
+            if (!peerCandidatesById) {
+                return;
+            }
+            var index = peerCandidatesById.indexOf(peer);
+            if (index != -1) {
+                peerCandidatesById.splice(index, 1);
+            }
+            if (peerCandidatesById.length == 0) {
+                this.peerCandidates.delete(peer.id);
+            }
+            return;
+        }
         this.peerSegmentRequests.forEach(function (value, key) {
-            if (value.peerId === peer.id) {
+            if (value.peerId == peer.id) {
                 _this.peerSegmentRequests.delete(key);
             }
         });
@@ -16872,21 +16911,14 @@ utils.intFromLE = intFromLE;
 module.exports={
   "_args": [
     [
-      {
-        "raw": "elliptic@^6.0.0",
-        "scope": null,
-        "escapedName": "elliptic",
-        "name": "elliptic",
-        "rawSpec": "^6.0.0",
-        "spec": ">=6.0.0 <7.0.0",
-        "type": "range"
-      },
+      "elliptic@^6.0.0",
       "/home/andriy/work/novage/p2pml/p2p-media-loader/p2p-media-loader-core/node_modules/browserify-sign"
     ]
   ],
   "_from": "elliptic@>=6.0.0 <7.0.0",
   "_id": "elliptic@6.4.0",
   "_inCache": true,
+  "_installable": true,
   "_location": "/elliptic",
   "_nodeVersion": "7.0.0",
   "_npmOperationalInternal": {
@@ -16894,17 +16926,16 @@ module.exports={
     "tmp": "tmp/elliptic-6.4.0.tgz_1487798866428_0.30510620190761983"
   },
   "_npmUser": {
-    "name": "indutny",
-    "email": "fedor@indutny.com"
+    "email": "fedor@indutny.com",
+    "name": "indutny"
   },
   "_npmVersion": "3.10.8",
   "_phantomChildren": {},
   "_requested": {
-    "raw": "elliptic@^6.0.0",
-    "scope": null,
-    "escapedName": "elliptic",
     "name": "elliptic",
+    "raw": "elliptic@^6.0.0",
     "rawSpec": "^6.0.0",
+    "scope": null,
     "spec": ">=6.0.0 <7.0.0",
     "type": "range"
   },
@@ -16918,8 +16949,8 @@ module.exports={
   "_spec": "elliptic@^6.0.0",
   "_where": "/home/andriy/work/novage/p2pml/p2p-media-loader/p2p-media-loader-core/node_modules/browserify-sign",
   "author": {
-    "name": "Fedor Indutny",
-    "email": "fedor@indutny.com"
+    "email": "fedor@indutny.com",
+    "name": "Fedor Indutny"
   },
   "bugs": {
     "url": "https://github.com/indutny/elliptic/issues"
@@ -16961,10 +16992,10 @@ module.exports={
   "gitHead": "6b0d2b76caae91471649c8e21f0b1d3ba0f96090",
   "homepage": "https://github.com/indutny/elliptic",
   "keywords": [
+    "Cryptography",
     "EC",
     "Elliptic",
-    "curve",
-    "Cryptography"
+    "curve"
   ],
   "license": "MIT",
   "main": "lib/elliptic.js",
