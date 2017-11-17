@@ -230,14 +230,16 @@ var HybridLoader = /** @class */ (function (_super) {
         _this.speedApproximator = new speed_approximator_1.SpeedApproximator();
         _this.settings = {
             segmentIdGenerator: function (url) { return url; },
-            cacheSegmentExpiration: 5 * 60 * 1000,
-            maxCacheSegmentsCount: 20,
-            requiredSegmentsCount: 2,
+            cachedSegmentExpiration: 5 * 60 * 1000,
+            cachedSegmentsCount: 20,
             useP2P: true,
+            requiredSegmentsCount: 2,
             simultaneousP2PDownloads: 3,
             httpDownloadProbability: 0.06,
             httpDownloadProbabilityInterval: 500,
-            bufferSegmentsCount: 20,
+            bufferedSegmentsCount: 20,
+            webRtcMaxMessageSize: 16 * 1024,
+            p2pSegmentDownloadTimeout: 60000,
             trackerAnnounce: ["wss://tracker.btorrent.xyz/", "wss://tracker.openwebtorrent.com/"]
         };
         _this.settings = Object.assign(_this.settings, settings);
@@ -266,7 +268,7 @@ var HybridLoader = /** @class */ (function (_super) {
         return new http_media_manager_1.default();
     };
     HybridLoader.prototype.createP2PManager = function () {
-        return new p2p_media_manager_1.P2PMediaManager(this.segments, this.settings.useP2P ? this.settings.trackerAnnounce : []);
+        return new p2p_media_manager_1.P2PMediaManager(this.segments, this.settings);
     };
     HybridLoader.prototype.load = function (segments, swarmId, emitNowSegmentUrl) {
         this.p2pManager.setSwarmId(swarmId);
@@ -371,7 +373,7 @@ var HybridLoader = /** @class */ (function (_super) {
                         updateSegmentsMap = true;
                     }
                 }
-                else if (!this.httpManager.isDownloading(segment) && this.p2pManager.getActiveDownloadsCount() < this.settings.simultaneousP2PDownloads && downloadedSegmentsCount < this.settings.bufferSegmentsCount) {
+                else if (!this.httpManager.isDownloading(segment) && this.p2pManager.getActiveDownloadsCount() < this.settings.simultaneousP2PDownloads && downloadedSegmentsCount < this.settings.bufferedSegmentsCount) {
                     if (this.p2pManager.download(segment)) {
                         this.debug("P2P download", segment.priority, segment.url);
                     }
@@ -396,7 +398,7 @@ var HybridLoader = /** @class */ (function (_super) {
                 !_this.p2pManager.isDownloading(segment);
         });
         downloadedSegmentsCount = this.segmentsQueue.length - pendingQueue.length;
-        if (pendingQueue.length == 0 || downloadedSegmentsCount >= this.settings.bufferSegmentsCount) {
+        if (pendingQueue.length == 0 || downloadedSegmentsCount >= this.settings.bufferedSegmentsCount) {
             return updateSegmentsMap;
         }
         var segmentsMap = this.p2pManager.getOvrallSegmentsMap();
@@ -455,7 +457,7 @@ var HybridLoader = /** @class */ (function (_super) {
         var remainingValues = [];
         var expiredKeys = [];
         this.segments.forEach(function (value, key) {
-            if (now - value.lastAccessed > _this.settings.cacheSegmentExpiration) {
+            if (now - value.lastAccessed > _this.settings.cachedSegmentExpiration) {
                 expiredKeys.push(key);
             }
             else {
@@ -463,7 +465,7 @@ var HybridLoader = /** @class */ (function (_super) {
             }
         });
         remainingValues.sort(function (a, b) { return a.lastAccessed - b.lastAccessed; });
-        var countOverhead = remainingValues.length - this.settings.maxCacheSegmentsCount;
+        var countOverhead = remainingValues.length - this.settings.cachedSegmentsCount;
         if (countOverhead > 0) {
             remainingValues.slice(0, countOverhead).forEach(function (value) { return expiredKeys.push(value.id); });
         }
@@ -554,18 +556,17 @@ var DownloadingSegment = /** @class */ (function () {
     }
     return DownloadingSegment;
 }());
-var MAX_MESSAGE_SIZE = 16 * 1024;
-var RESPONSE_TIMEOUT = 3000;
 var MediaPeer = /** @class */ (function (_super) {
     __extends(MediaPeer, _super);
-    function MediaPeer(peer) {
+    function MediaPeer(peer, settings) {
         var _this = _super.call(this) || this;
+        _this.peer = peer;
+        _this.settings = settings;
         _this.downloadingSegmentId = null;
         _this.downloadingSegment = null;
         _this.segmentsMap = new Map();
         _this.debug = Debug("p2pml:media-peer");
         _this.timer = null;
-        _this.peer = peer;
         _this.peer.on("connect", function () { return _this.onPeerConnect(); });
         _this.peer.on("close", function () { return _this.onPeerClose(); });
         _this.peer.on("error", function (error) { return _this.onPeerError(error); });
@@ -694,7 +695,7 @@ var MediaPeer = /** @class */ (function (_super) {
         });
         var bytesLeft = data.byteLength;
         while (bytesLeft > 0) {
-            var bytesToSend = (bytesLeft >= MAX_MESSAGE_SIZE ? MAX_MESSAGE_SIZE : bytesLeft);
+            var bytesToSend = (bytesLeft >= this.settings.webRtcMaxMessageSize ? this.settings.webRtcMaxMessageSize : bytesLeft);
             // Using Buffer.from because TypedArrays as input to this function cause memory copying
             this.peer.write(buffer_1.Buffer.from(data, data.byteLength - bytesLeft, bytesToSend));
             bytesLeft -= bytesToSend;
@@ -731,7 +732,7 @@ var MediaPeer = /** @class */ (function (_super) {
             var segmentId = _this.downloadingSegmentId;
             _this.cancelSegmentRequest();
             _this.emit(MediaPeerEvents.SegmentTimeout, _this, segmentId); // TODO: send peer not responding event
-        }, RESPONSE_TIMEOUT);
+        }, this.settings.p2pSegmentDownloadTimeout);
     };
     MediaPeer.prototype.cancelResponseTimeoutTimer = function () {
         if (this.timer) {
@@ -780,14 +781,15 @@ var P2PMediaManagerEvents;
 })(P2PMediaManagerEvents = exports.P2PMediaManagerEvents || (exports.P2PMediaManagerEvents = {}));
 var P2PMediaManager = /** @class */ (function (_super) {
     __extends(P2PMediaManager, _super);
-    function P2PMediaManager(segments, announce) {
+    function P2PMediaManager(segments, settings) {
         var _this = _super.call(this) || this;
+        _this.segments = segments;
+        _this.settings = settings;
         _this.trackerClient = null;
         _this.peers = new Map();
         _this.peerCandidates = new Map();
         _this.peerSegmentRequests = new Map();
         _this.debug = Debug("p2pml:p2p-media-manager");
-        _this.announce = announce;
         _this.segments = segments;
         _this.peerId = crypto_1.createHash("sha1").update((Date.now() + Math.random()).toFixed(12)).digest("hex");
         _this.debug("peerId", _this.peerId);
@@ -804,13 +806,13 @@ var P2PMediaManager = /** @class */ (function (_super) {
     };
     P2PMediaManager.prototype.createClient = function (infoHash) {
         var _this = this;
-        if (!this.announce || this.announce.length == 0) {
+        if (!this.settings.useP2P) {
             return;
         }
         var clientOptions = {
             infoHash: infoHash,
             peerId: this.peerId,
-            announce: this.announce
+            announce: this.settings.trackerAnnounce
         };
         this.trackerClient = new bittorrent_tracker_1.Client(clientOptions);
         this.trackerClient.on("error", function (error) { return _this.debug("client error", error); });
@@ -824,7 +826,7 @@ var P2PMediaManager = /** @class */ (function (_super) {
             trackerPeer.destroy();
             return;
         }
-        var peer = new media_peer_1.MediaPeer(trackerPeer);
+        var peer = new media_peer_1.MediaPeer(trackerPeer, this.settings);
         peer.on(media_peer_1.MediaPeerEvents.Connect, this.onPeerConnect.bind(this));
         peer.on(media_peer_1.MediaPeerEvents.Close, this.onPeerClose.bind(this));
         peer.on(media_peer_1.MediaPeerEvents.Error, this.onPeerError.bind(this));
